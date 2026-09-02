@@ -297,13 +297,13 @@ function buildUtilizationDashboardShell() {
         + '<button type="button" id="utilFilterReset" class="btn btn-default form-control" style="border-radius:8px;font-weight:600;">Reset</button></div>'
         + '</div>'
         + '<div id="utilizationChartsBody">'
-        + '<div class="utilization-chart-card"><div class="utilization-chart-title">Overall fill rate over time (click a date to filter)</div>'
+        + '<div class="utilization-chart-card"><div class="utilization-chart-title">Overall KM utilization % over time (click a date to filter)</div>'
         + '<div class="util-chart-wrap util-timeline-chart-wrap"><canvas id="utilizationTimeChart"></canvas></div></div>'
         + '<div id="utilizationSummaryCards" class="utilization-summary-cards"></div>'
         + '<div class="utilization-charts-row util-paired-charts-row">'
-        + '<div class="utilization-chart-card util-paired-chart-card"><div class="utilization-chart-title">Fill rate by class</div>'
+        + '<div class="utilization-chart-card util-paired-chart-card"><div class="utilization-chart-title">KM utilization % by class</div>'
         + '<div class="util-chart-wrap util-paired-chart-wrap" data-chart="classBar"><canvas id="utilizationClassChart"></canvas></div></div>'
-        + '<div class="utilization-chart-card util-paired-chart-card"><div class="utilization-chart-title">Fill rate by quota</div>'
+        + '<div class="utilization-chart-card util-paired-chart-card"><div class="utilization-chart-title">KM utilization % by quota</div>'
         + '<div class="util-chart-wrap util-paired-chart-wrap" data-chart="quota"><canvas id="utilizationQuotaChart"></canvas></div></div>'
         + '</div>'
         + '<div class="row utilization-detail-row">'
@@ -480,7 +480,7 @@ function populateUtilizationFilters() {
     var opts = collectUtilizationFilterOptions();
 
     fillUtilizationSelect('#utilFilterClass', 'All classes', opts.classes, UTILIZATION_STATE.filters.classVal);
-    fillUtilizationSelect('#utilFilterQuota', 'All quotas', opts.quotas, UTILIZATION_STATE.filters.quotaVal);
+    fillUtilizationSelect('#utilFilterQuota', 'All quotas', opts.quotas, UTILIZATION_STATE.filters.quotaVal, quotaTitleIfDifferent);
     fillUtilizationSelect('#utilFilterSource', 'All sources', opts.sources, UTILIZATION_STATE.filters.sourceVal);
     fillUtilizationSelect('#utilFilterDestination', 'All destinations', opts.dests, UTILIZATION_STATE.filters.destinationVal);
 
@@ -494,11 +494,12 @@ function populateUtilizationFilters() {
     }
 }
 
-function fillUtilizationSelect(selector, allLabel, values, selectedValue) {
+function fillUtilizationSelect(selector, allLabel, values, selectedValue, titleFn) {
     var html = '<option value="">' + allLabel + '</option>';
     values.forEach(function (val) {
         var selected = selectedValue === val ? ' selected' : '';
-        html += '<option value="' + escapeHtmlAttr(val) + '"' + selected + '>' + escapeHtml(val) + '</option>';
+        var title = typeof titleFn === 'function' ? titleFn(val) : '';
+        html += '<option value="' + escapeHtmlAttr(val) + '"' + selected + (title ? ' title="' + escapeHtmlAttr(title) + '"' : '') + '>' + escapeHtml(val) + '</option>';
     });
     $(selector).html(html);
 }
@@ -1359,6 +1360,10 @@ function buildHorizontalBarConfig(series, layoutOpts, isQuotaChart) {
                     legend: { display: false },
                     tooltip: {
                         callbacks: {
+                            title: function (items) {
+                                var lbl = items && items[0] ? labels[items[0].dataIndex] : '';
+                                return isQuotaChart ? getQuotaFullName(lbl) : lbl;
+                            },
                             label: function (ctx) {
                                 return ' ' + (labels[ctx.dataIndex] || '') + ': ' + formatPercent(ctx.parsed.x || 0);
                             }
