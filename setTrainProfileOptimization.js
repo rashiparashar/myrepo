@@ -85,10 +85,22 @@ function bindOptimizationTab() {
 			buildOptimizationTabShell();
 		}
 		initializeDefaultDatesForOptAndUtil(false);
+		if (typeof OPT_PROFILE !== 'undefined' && OPT_PROFILE.profileMode === 'EDIT') {
+			refreshOptimizationProfileList();
+		}
 	});
 
 	$('#optimizationContainer').on('click', '#showOptimizationBtn', function () {
 		loadTrainOptimization();
+	});
+	$('#optimizationContainer').on('change', 'input[name="optProfileMode"]', function () {
+		setOptProfileMode($(this).val());
+	});
+	$('#optimizationContainer').on('change', '#optSavedProfileSelect', function () {
+		var profileId = String($(this).val() || '').trim();
+		if (profileId) {
+			loadSelectedOptimizationProfile(profileId);
+		}
 	});
 }
 function formatDate(dateStr) {
@@ -100,6 +112,10 @@ function formatDate(dateStr) {
     return parts[2] + '-' + parts[1] + '-' + parts[0];
 }
 function loadTrainOptimization() {
+	if (OPT_PROFILE.profileMode === 'EDIT' && !OPT_PROFILE.selectedProfileId) {
+		alert('Please select a saved profile');
+		return;
+	}
 	var fromDate = $('#optFromDate').val();
 	var toDate = $('#optToDate').val();
 	if (!fromDate || !toDate || fromDate >= toDate) {
@@ -120,11 +136,18 @@ function loadTrainOptimization() {
 	getOptimizationData(fromDate, toDate)
 		.then(function (response) {
 			console.log(response);
+			if (OPT_PROFILE.profileMode === 'EDIT' && OPT_PROFILE.profilePayload) {
+				persistReoptimizeDelta({
+					edited_berths: OPT_PROFILE.profilePayload.edited_berths || {},
+					remote_added: OPT_PROFILE.profilePayload.remote_added || [],
+					remote_removed: OPT_PROFILE.profilePayload.remote_removed || []
+				});
+			}
 			drawOptimizationProfile(response);
 		})
 		.catch(function (error) {
 			console.error(error);
-			alert('Failed to fetch optimization data');
+			alert(error.message || 'Failed to fetch optimization data');
 			$('#optimizationContent').html(
 				'<div class="alert alert-danger text-center">Failed to load optimization data.</div>'
 			);
@@ -233,8 +256,9 @@ function renderProfileCards(profile, activeClass){
 	        var width = Math.max((((distMap[d] || 0) - (distMap[s] || 0)) / maxDist) * 100, 2);
 	        var color = hashColor(quota);
 	        var lightBg = color + '15';
+	        var quotaTitle = (typeof getQuotaFullName === 'function') ? getQuotaFullName(quota) : quota;
 	        html += '<div class="berth-alloc-row">'
-	            + '<div class="berth-alloc-quota" style="color:' + color + ';">' + quota + '</div>'
+	            + '<div class="berth-alloc-quota" style="color:' + color + ';"' + (quotaTitle && quotaTitle !== quota ? ' title="' + quotaTitle + '"' : '') + '>' + quota + '</div>'
 	            + '<div class="berth-alloc-track" style="background:' + lightBg + ';">'
 	            + '<div class="berth-alloc-bar" style="left:' + left + '%;width:' + width + '%;background:' + lightBg + ';border-color:' + color + ';color:' + color + ';">'
 	            + berth + ' berths · ' + s + '→' + d
@@ -337,219 +361,700 @@ function renderProfileCards(profile, activeClass){
 	function isWeekend(dateStr){ var d=new Date(dateStr+'T00:00:00'); var day=d.getDay(); return day===0 || day===6; }
 	function isHolidayRow(r, holidaySet){ return (r.IS_HOLIDAY==='Y' || r.HOLIDAY==='Y' || r.IS_HOLIDAY===true || (holidaySet && holidaySet[r.JOURNEY_DATE])); }
 	function weekStart(dateStr){ var d=new Date(dateStr+'T00:00:00'); var day=d.getDay(); var diff=(day+6)%7; d.setDate(d.getDate()-diff); return d.toISOString().slice(0,10); }
-	function aggregateDemandRows(rows, mode, holidaySet){
+	function aggregateDemandRows(rows, mode, holidaySet, fromDate, toDate) {
 
-		  var map = {};
+	    var map = {};
 
-		  (rows || []).forEach(function(r){
+	    if (mode !== 'weekly') {
 
-		    var date = r.JOURNEY_DATE || '-';
+	        (rows || []).forEach(function(r) {
 
-		    var key = mode === 'weekly'
-		      ? (r.WEEK_START || weekStart(date))
-		      : date;
+	            var date = r.JOURNEY_DATE || '-';
 
-		    if(!map[key]){
+	            if (!map[date]) {
 
-		      var weekEnd = null;
+	                map[date] = {
+	                    JOURNEY_DATE: date,
+	                    WEEK_START: null,
+	                    WEEK_END: date,
+	                    TOT_PSGN: 0,
+	                    DATES: [],
+	                    HOLIDAY: 'N',
+	                    WEEKEND: 'N',
+	                    FESTIVALS: [],
+	                    DEMAND_TYPE: null
+	                };
+	            }
 
-		      if(mode === 'weekly'){
-		        weekEnd = new Date(key + 'T00:00:00');
-		        weekEnd.setDate(weekEnd.getDate() + 6);
-		      }
-		    		  map[key] = {
-		    				    JOURNEY_DATE : key,
-		    				    WEEK_START   : mode === 'weekly' ? key : null,
-		    				    WEEK_END     : date,
-		    				    TOT_PSGN     : 0,
-		    				    DATES        : [],
-		    				    HOLIDAY      : 'N',
-		    				    WEEKEND      : 'N',
-		    				    FESTIVALS    : []
-		    				};
-		    }
+	            map[date].TOT_PSGN += demandValue(r);
 
-		    map[key].TOT_PSGN += demandValue(r);
-		    if(mode === 'weekly'){
-		        if(map[key].DATES.indexOf(date) === -1){
-		            map[key].DATES.push(date);
-		        }
-		    }
-		    if(mode === 'weekly'){
-		        if(date > map[key].WEEK_END){
-		            map[key].WEEK_END = date;
-		        }
-		    }
-		    if(isWeekend(date)){
-		      map[key].WEEKEND = 'Y';
-		    }
+	            if (isWeekend(date)) {
+	                map[date].WEEKEND = 'Y';
+	            }
+	            if (
+	            	    holidaySet &&
+	            	    holidaySet[date] &&
+	            	    holidaySet[date].length
+	            	) {
 
-		    if(holidaySet && holidaySet[date]){
+	            	    map[date].HOLIDAY = 'Y';
 
-		      map[key].HOLIDAY = 'Y';
+	            	    holidaySet[date].forEach(function(festival) {
 
-		      var festival = holidaySet[date];
+	            	        if (
+	            	            festival &&
+	            	            map[date].FESTIVALS.indexOf(festival) === -1
+	            	        ) {
+	            	            map[date].FESTIVALS.push(festival);
+	            	        }
 
-		      if(
-		        festival &&
-		        map[key].FESTIVALS.indexOf(festival) === -1
-		      ){
-		        map[key].FESTIVALS.push(festival);
-		      }
-		    }
-		  });
+	            	    });
+	            	}
+	            var demandType = String(
+	                r.DEMAND_TYPE || ''
+	            ).trim().toUpperCase();
 
-		  return Object.keys(map)
-		    .sort()
-		    .map(function(k){
+	            if (demandType === 'HIST') {
+	                map[date].DEMAND_TYPE = 'HIST';
+	            }
+	            else if (
+	                demandType === 'PRED' &&
+	                !map[date].DEMAND_TYPE
+	            ) {
+	                map[date].DEMAND_TYPE = 'PRED';
+	            }
 
-		        var row = map[k];
+	        });
 
-		        if(mode === 'weekly'){
+	        return Object.keys(map)
+	            .sort()
+	            .map(function(k) {
+	                return map[k];
+	            });
+	    }
 
-		            var days = row.DATES.length || 1;
+	    fromDate = fromDate || '';
+	    toDate = toDate || '';
 
-		            row.TOT_PSGN = Math.round(
-		                row.TOT_PSGN / days
-		            );
-		        }
+	    if (!fromDate || !toDate) {
+	        return [];
+	    }
 
-		        return row;
-		    });
-		}
-	function updateDemandChart(rows, mode, holidays){
-	  var c = document.getElementById('demandChart');
-	  updateDemandStats(rows || []);
-	  if(!c || !window.Chart) return;
-	  var holidaySet = {};
-	  var holidayMap = {};
+	    var buckets = [];
 
-	  (holidays || []).forEach(function(h){
+	    var start = new Date(
+	        fromDate + 'T00:00:00'
+	    );
 
-		    holidaySet[h.HOLIDAY_DATE] = h.HOLIDAY;
-		    holidayMap[h.HOLIDAY_DATE] = h.HOLIDAY;
+	    var end = new Date(
+	        toDate + 'T00:00:00'
+	    );
 
-		});
-	  var dataRows = aggregateDemandRows(rows || [], mode, holidaySet);
-	  var labels = dataRows.map(function(r){ return r.JOURNEY_DATE; });
-	  var vals = dataRows.map(function(r){ return demandValue(r); });
-	  var pointBg = dataRows.map(function(r){ if(r.HOLIDAY==='Y') return '#28a745'; if(r.WEEKEND==='Y') return '#ff9800'; return '#337ab7'; });
-	  var formattedLabels = labels.map(function(date){return formatDate(date);});
-	  function getDayName(dateStr){
-		    return new Date(dateStr + 'T00:00:00')
-		        .toLocaleDateString('en-US', {
-		            weekday: 'long'
-		        });
-		}
-	  if (demandChart) {
-		    demandChart.destroy();
-		}
 
-		demandChart = new Chart(c, {
-		    type: 'line',
-		    data: {
-		        labels: formattedLabels,
-		        datasets: [{
-		            label: 'Passenger Demand',
-		            data: vals,
-		            borderColor: '#2563eb',
-		            backgroundColor: 'rgba(37,99,235,0.08)',
-		            pointBackgroundColor: pointBg,
-		            pointBorderColor: '#fff',
-		            pointRadius: 4,
-		            pointHoverRadius: 7,
-		            borderWidth: 2,
-		            tension: 0.4,     
-		            fill: true
-		        }]
-		    },
-		    options: {
-		        responsive: true,
-		        maintainAspectRatio: false,
+	    while (start <= end) {
 
-		        interaction: {
-		            mode: 'index',
-		            intersect: false
-		        },
+	        var bucketStart = new Date(start);
 
-		        plugins: {
-		            legend: {
-		                display: true,
-		                position: 'top'
-		            },
-		            tooltip: {
-		                enabled: true,
+	        var day = bucketStart.getDay();
 
-		                callbacks: {
+	        var daysToSunday = 7 - day;
 
-		                    title: function(context) {
+	        if (daysToSunday === 7) {
+	            daysToSunday = 0;
+	        }
 
-		                        var idx = context[0].dataIndex;
-		                        var row = dataRows[idx];
 
-		                        if(mode === 'weekly'){
+	        var bucketEnd = new Date(bucketStart);
 
-		                            var result = [
-		                                formatDate(row.WEEK_START) +
-		                                ' to ' +
-		                                formatDate(row.WEEK_END),
-		                                '(Monday - Sunday)'
-		                            ];
+	        bucketEnd.setDate(
+	            bucketEnd.getDate() + daysToSunday
+	        );
 
-		                            if(row.FESTIVALS && row.FESTIVALS.length){
+	        if (bucketEnd > end) {
+	            bucketEnd = new Date(end);
+	        }
 
-		                                result.push(
-		                                    'Festival' +
-		                                    (row.FESTIVALS.length > 1 ? 's' : '') +
-		                                    ': ' +
-		                                    row.FESTIVALS.join(', ')
-		                                );
-		                            }
 
-		                            return result;
-		                        }
+	        buckets.push({
+	            start: new Date(bucketStart),
+	            end: new Date(bucketEnd)
+	        });
 
-		                        var originalDate = labels[idx];
+	        start = new Date(bucketEnd);
 
-		                        var result = [
-		                            formatDate(originalDate),
-		                            getDayName(originalDate)
-		                        ];
+	        start.setDate(
+	            start.getDate() + 1
+	        );
+	    }
+	    function dateKey(d) {
 
-		                        if(holidayMap[originalDate]){
-		                            result.push(holidayMap[originalDate]);
-		                        }
+	        return d.getFullYear() + '-' +
+	            String(d.getMonth() + 1).padStart(2, '0') + '-' +
+	            String(d.getDate()).padStart(2, '0');
+	    }
+	    (rows || []).forEach(function(r) {
 
-		                        return result;
-		                    },
+	        var date = r.JOURNEY_DATE;
 
-		                    label: function(context) {
-		                        return 'Passengers : ' + context.raw;
-		                    }
-		                }
-		            }
-		        },
+	        if (!date) {
+	            return;
+	        }
 
-		        scales: {
-		            x: {
-		                ticks: {
-		                    maxRotation: 45,
-		                    minRotation: 45
-		                },
-		                title: {
-		                    display: true,
-		                    text: 'Journey Date'
-		                }
-		            },
 
-		            y: {
-		                beginAtZero: true,
-		                title: {
-		                    display: true,
-		                    text: 'Total Passengers'
-		                }
-		            }
-		        }
-		    }
-		});
+	        var d = new Date(
+	            date + 'T00:00:00'
+	        );
+
+
+	        for (var i = 0; i < buckets.length; i++) {
+
+	            var b = buckets[i];
+
+	            if (
+	                d >= b.start &&
+	                d <= b.end
+	            ) {
+
+	                var key = dateKey(b.start);
+
+
+	                if (!map[key]) {
+
+	                    map[key] = {
+
+	                        JOURNEY_DATE: key,
+
+	                        WEEK_START: dateKey(
+	                            b.start
+	                        ),
+
+	                        WEEK_END: dateKey(
+	                            b.end
+	                        ),
+
+	                        TOT_PSGN: 0,
+
+	                        DATES: [],
+
+	                        HOLIDAY: 'N',
+
+	                        WEEKEND: 'N',
+
+	                        FESTIVALS: [],
+
+	                        DEMAND_TYPE: null
+
+	                    };
+	                }
+	                map[key].TOT_PSGN += demandValue(r);
+	                if (
+	                    map[key].DATES.indexOf(date) === -1
+	                ) {
+
+	                    map[key].DATES.push(date);
+
+	                }
+	                if (isWeekend(date)) {
+	                    map[key].WEEKEND = 'Y';
+	                }
+
+	                if (
+	                	    holidaySet &&
+	                	    holidaySet[date] &&
+	                	    holidaySet[date].length
+	                	) {
+
+	                	    map[key].HOLIDAY = 'Y';
+
+	                	    holidaySet[date].forEach(function(festival) {
+
+	                	        if (
+	                	            festival &&
+	                	            map[key].FESTIVALS.indexOf(festival) === -1
+	                	        ) {
+	                	            map[key].FESTIVALS.push(festival);
+	                	        }
+
+	                	    });
+	                	}
+	                var demandType = String(
+	                    r.DEMAND_TYPE || ''
+	                ).trim().toUpperCase();
+
+	                if (demandType === 'HIST') {
+
+	                    map[key].DEMAND_TYPE =
+	                        'HIST';
+
+	                }
+	                else if (
+	                    demandType === 'PRED' &&
+	                    !map[key].DEMAND_TYPE
+	                ) {
+
+	                    map[key].DEMAND_TYPE =
+	                        'PRED';
+
+	                }
+
+	                break;
+	            }
+	        }
+
+	    });
+	    return buckets.map(function(b) {
+
+	        var key = dateKey(b.start);
+
+	        var row = map[key];
+
+
+	        if (!row) {
+
+	            row = {
+
+	                JOURNEY_DATE: key,
+
+	                WEEK_START: dateKey(
+	                    b.start
+	                ),
+
+	                WEEK_END: dateKey(
+	                    b.end
+	                ),
+
+	                TOT_PSGN: 0,
+
+	                DATES: [],
+
+	                HOLIDAY: 'N',
+
+	                WEEKEND: 'N',
+
+	                FESTIVALS: [],
+
+	                DEMAND_TYPE: null
+
+	            };
+	        }
+
+	        var days =
+	            row.DATES.length || 1;
+
+
+	        row.TOT_PSGN = Math.round(
+	            row.TOT_PSGN / days
+	        );
+
+
+	        return row;
+
+	    });
+	}
+	function updateDemandChart(rows, mode, holidays) {
+
+	    var c = document.getElementById('demandChart');
+
+	    updateDemandStats(rows || []);
+
+	    if (!c || !window.Chart) return;
+
+	    var holidaySet = {};
+	    var holidayMap = {};
+
+	    (holidays || []).forEach(function(h) {
+
+	        var date = h.HOLIDAY_DATE;
+	        var holiday = h.HOLIDAY;
+
+	        if (!date || !holiday) {
+	            return;
+	        }
+
+	        // Store ALL holidays for the same date
+	        if (!holidaySet[date]) {
+	            holidaySet[date] = [];
+	        }
+
+	        if (holidaySet[date].indexOf(holiday) === -1) {
+	            holidaySet[date].push(holiday);
+	        }
+
+	        // Same data for tooltip
+	        holidayMap[date] = holidaySet[date];
+
+	    });
+//
+//	    var dataRows = aggregateDemandRows(rows || [], mode, holidaySet);
+//
+//	    var labels = dataRows.map(function(r) {
+//	        return r.JOURNEY_DATE;
+//	    });
+//
+//	    var vals = dataRows.map(function(r) {
+//	        return demandValue(r);
+//	    });
+	    var fromDate = '';
+	    var toDate = '';
+
+	    if (mode === 'weekly' && rows && rows.length) {
+
+	        var apiDates = rows
+	            .map(function(r) {
+	                return r.JOURNEY_DATE;
+	            })
+	            .filter(function(d) {
+	                return !!d;
+	            })
+	            .sort();
+
+	        if (apiDates.length) {
+	            fromDate = apiDates[0];
+	            toDate = apiDates[apiDates.length - 1];
+	        }
+	    }
+
+	    var dataRows = aggregateDemandRows(
+	        rows || [],
+	        mode,
+	        holidaySet,
+	        fromDate,
+	        toDate
+	    );
+	 var labels = dataRows.map(function(r) {
+	     return r.JOURNEY_DATE;
+	 });
+
+	 var vals = dataRows.map(function(r) {
+	     return demandValue(r);
+	 });
+	    var today = new Date();
+	    today.setHours(0, 0, 0, 0);
+
+
+	    var pointBg = dataRows.map(function(r) {
+
+	        if (r.HOLIDAY === 'Y') {
+	            return '#28a745';
+	        }
+
+	        if (r.WEEKEND === 'Y') {
+	            return '#ff9800';
+	        }
+
+	        return '#337ab7';
+
+	    });
+
+
+	    var formattedLabels = dataRows.map(function(r) {
+
+	        if (mode === 'weekly') {
+
+	            return formatDate(r.WEEK_START) +
+	                   ' - ' +
+	                   formatDate(r.WEEK_END);
+
+	        }
+
+	        return formatDate(r.JOURNEY_DATE);
+	    });
+
+
+	    function getDayName(dateStr) {
+
+	        return new Date(dateStr + 'T00:00:00')
+	            .toLocaleDateString('en-US', {
+	                weekday: 'long'
+	            });
+
+	    }
+
+
+
+	    if (demandChart) {
+	        demandChart.destroy();
+	    }
+
+	    demandChart = new Chart(c, {
+
+	        type: 'line',
+
+	        data: {
+
+	            labels: formattedLabels,
+
+	            datasets: [
+
+	                {
+	                	 label: 'Demand',
+
+	                	    data: vals,
+
+	                	    borderColor: '#2563eb',
+
+	                	    backgroundColor: 'rgba(37,99,235,0.08)',
+
+	                	    pointBackgroundColor: pointBg,
+
+	                	    pointBorderColor: '#fff',
+
+	                	    pointRadius: 4,
+
+	                	    pointHoverRadius: 7,
+
+	                	    borderWidth: 2,
+
+	                	    tension: 0.4,
+
+	                	    fill: true,
+
+	                	    segment: {
+
+	                	        borderColor: function(ctx) {
+
+	                	            var index = ctx.p0DataIndex;
+	                	            var row = dataRows[index];
+
+	                	            if (!row) {
+	                	                return '#2563eb';
+	                	            }
+
+	                	            var demandType = String( row.DEMAND_TYPE || '').toUpperCase();
+	                	            if (demandType === 'HIST') {
+	                	                return '#dc3545';
+	                	            }
+
+	                	            if (demandType === 'PRED') {
+	                	                return '#2563eb';
+	                	            }
+
+	                	            return '#2563eb';
+	                	        },
+
+	                	        backgroundColor: function(ctx) {
+
+	                	            var index = ctx.p0DataIndex;
+	                	            var row = dataRows[index];
+
+	                	            if (!row) {
+	                	                return 'rgba(37,99,235,0.08)';
+	                	            }
+
+	                	            var demandType = String( row.DEMAND_TYPE || '').toUpperCase();
+
+	                	            if (demandType === 'HIST') {
+	                	                return 'rgba(220,53,69,0.12)';
+	                	            }
+
+	                	            if (demandType === 'PRED') {
+	                	                return 'rgba(37,99,235,0.08)';
+	                	            }
+
+	                	            return 'rgba(37,99,235,0.08)';
+	                	        }
+	                	    }
+	                	}
+	            ]
+
+	        },
+
+
+	        options: {
+
+	            responsive: true,
+
+	            maintainAspectRatio: false,
+
+
+	            interaction: {
+
+	                mode: 'index',
+
+	                intersect: false
+
+	            },
+
+
+	            plugins: {
+
+	            	legend: {
+
+	            	    display: true,
+
+	            	    position: 'top',
+	            	    onClick: function () {
+	            	    },
+
+	            	    labels: {
+
+	            	        generateLabels: function(chart) {
+
+	            	     
+	            	        	return [
+
+	            	                {
+	            	                    text: 'Historical',
+	            	                    fillStyle: 'transparent',
+	            	                    strokeStyle: '#dc3545',
+	            	                    lineWidth: 2,
+	            	                    hidden: false,
+	            	                    datasetIndex: 0
+	            	                },
+
+	            	                {
+	            	                    text: 'Prediction',
+	            	                    fillStyle: 'transparent',
+	            	                    strokeStyle: '#2563eb',
+	            	                    lineWidth: 2,
+	            	                    hidden: false,
+	            	                    datasetIndex: 0
+	            	                }
+
+	            	            ];
+
+	            	        }
+
+	            	    }
+
+	            	},
+
+	                tooltip: {
+
+	                    enabled: true,
+
+	                    callbacks: {
+
+	                        title: function(context) {
+
+	                            var idx = context[0].dataIndex;
+
+	                            var row = dataRows[idx];
+	                            if (mode === 'weekly') {
+
+	                                var weekStartDay = getDayName(row.WEEK_START);
+	                                var weekEndDay   = getDayName(row.WEEK_END);
+
+	                                var result = [
+
+	                                    formatDate(row.WEEK_START) +
+	                                    ' to ' +
+	                                    formatDate(row.WEEK_END),
+
+	                                    '(' + weekStartDay + ' - ' + weekEndDay + ')'
+
+	                                ];
+
+
+	                                if (
+	                                    row.FESTIVALS &&
+	                                    row.FESTIVALS.length
+	                                ) {
+
+	                                    result.push(
+
+	                                        'Festival' +
+	                                        (
+	                                            row.FESTIVALS.length > 1
+	                                                ? 's'
+	                                                : ''
+	                                        ) +
+	                                        ': ' +
+	                                        row.FESTIVALS.join(', ')
+
+	                                    );
+
+	                                }
+
+	                                return result;
+
+	                            }
+
+	                            var originalDate = labels[idx];
+
+	                            var result = [
+
+	                                formatDate(originalDate),
+
+	                                getDayName(originalDate)
+
+	                            ];
+
+
+	                            if (
+	                            	    holidayMap[originalDate] &&
+	                            	    holidayMap[originalDate].length
+	                            	) {
+
+	                            	    result.push(
+	                            	        'Holiday: ' +
+	                            	        holidayMap[originalDate].join(', ')
+	                            	    );
+
+	                            	
+
+	                            }
+
+
+	                            return result;
+
+	                        },
+
+
+	                        label: function(context) {
+
+	                            return 'Passengers : ' + context.raw;
+
+	                        }
+
+	                    }
+
+	                }
+
+	            },
+
+
+	            scales: {
+
+	                x: {
+
+	                    ticks: {
+
+	                        maxRotation: 45,
+
+	                        minRotation: 45
+
+	                    },
+
+	                    title: {
+
+	                        display: true,
+
+	                        text: 'Journey Date'
+
+	                    }
+
+	                },
+
+
+	                y: {
+
+	                    beginAtZero: true,
+
+	                    title: {
+
+	                        display: true,
+
+	                        text: 'Total Passengers'
+
+	                    }
+
+	                }
+
+	            }
+
+	        }
+
+	    });
+
 	}
