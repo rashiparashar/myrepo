@@ -1,5 +1,6 @@
 <%@ page language="java" contentType="text/html; charset=ISO-8859-1" pageEncoding="ISO-8859-1" %>
 <%@taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core"%>
+<%@taglib prefix="fn" uri="http://java.sun.com/jsp/jstl/functions"%>
 
 <style>
 .route-card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;margin-top:15px;overflow-x:auto;border-radius: 8px !important;}.route-title{font-size:12px;font-weight:600;color:#888;margin-bottom:20px;letter-spacing:1px}.route-wrapper{position:relative;display:flex;justify-content:space-between;align-items:flex-start;min-width:max-content;padding-top:5px}.main-route-line{position:absolute;top:9px;left:30px;right:30px;height:2px;background:#bdbdbd;z-index:0}.route-node{position:relative;z-index:2;width:60px;display:flex;flex-direction:column;align-items:center;flex-shrink:0}.route-dot{width:10px;height:10px;border-radius:50%;background:#bdbdbd;margin-bottom:10px}.route-dot-active{width:12px;height:12px;border-radius:50%;background:#007bff;margin-bottom:10px}.route-label,.route-label-active{font-size:11px;transform:rotate(35deg);white-space:nowrap;margin-top:2px}.route-label{color:#999}.route-label-active{color:#007bff;font-weight:bold}
@@ -139,12 +140,31 @@
 .opt-berth-chevron.open{transform:rotate(180deg)}
 .opt-berth-cls-body{padding:12px 14px 10px;background:#fff}
 .opt-berth-toolbar-sub{font-size:11px;color:#888;margin-top:4px}
-.opt-quota-legend{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;padding:10px 12px;background:#fafbfe;border:1px solid #e8ecf4;border-radius:8px}
-.opt-quota-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#444}
-.opt-quota-legend-dot{width:10px;height:10px;border-radius:50%;background:var(--opt-quota-color,#7f7f7f);box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
-.opt-alloc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:8px;align-items:stretch}
-.opt-alloc-card{display:flex;flex-direction:column;min-height:96px;border:1px solid #e3e6ef;border-radius:8px;padding:8px 10px 6px 14px;background:#fff;position:relative;overflow:visible;transition:border-color .2s,box-shadow .2s}
+.opt-quota-legend{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;padding:10px 12px;background:#fafbfe;border:1px solid #e8ecf4;border-radius:8px}
+.opt-quota-legend-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.opt-quota-legend-items{display:flex;flex-wrap:wrap;gap:8px;align-items:center;flex:1 1 auto;min-width:0}
+.opt-quota-legend-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-left:auto}
+.opt-quota-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#444;font-family:inherit;background:transparent;border:1px solid transparent;border-radius:16px;padding:4px 10px 4px 8px;cursor:pointer;transition:background .18s ease,border-color .18s ease,box-shadow .18s ease,transform .12s ease,opacity .18s ease}
+.opt-quota-legend-item:hover{background:#fff;border-color:#d8deea;box-shadow:0 1px 4px rgba(15,23,42,.06);transform:translateY(-1px)}
+.opt-quota-legend-item:focus{outline:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--opt-quota-color,#7f7f7f) 35%,transparent)}
+.opt-quota-legend-item.is-selected{background:color-mix(in srgb,var(--opt-quota-color,#7f7f7f) 16%,#fff);border-color:color-mix(in srgb,var(--opt-quota-color,#7f7f7f) 55%,#fff);color:#1f2937;box-shadow:0 0 0 2px color-mix(in srgb,var(--opt-quota-color,#7f7f7f) 28%,transparent)}
+.opt-quota-legend.is-focusing .opt-quota-legend-item:not(.is-selected){opacity:.55}
+.opt-quota-legend-dot{width:10px;height:10px;border-radius:50%;background:var(--opt-quota-color,#7f7f7f);box-shadow:inset 0 0 0 1px rgba(0,0,0,.08);flex-shrink:0}
+.opt-quota-focus-summary{display:inline-flex;align-items:center;font-size:11px;font-weight:700;color:#334155;background:#eef3ff;border:1px solid #c5d4f7;border-radius:14px;padding:3px 10px;white-space:nowrap}
+.opt-quota-focus-reset{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#1b4fd8;background:#fff;border:1px solid #c5d4f7;border-radius:14px;padding:3px 10px;cursor:pointer;font-family:inherit;transition:background .15s,border-color .15s}
+.opt-quota-focus-reset:hover{background:#eef3ff;border-color:#9db4f0}
+.opt-route-focus{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px;padding-top:8px;border-top:1px dashed #e3e6ef}
+.opt-route-focus.is-active{border-top-color:#c5d4f7}
+.opt-route-focus-label{font-size:10px;font-weight:700;color:#667085;text-transform:uppercase;letter-spacing:.04em;display:inline-flex;align-items:center;gap:5px;margin-right:2px}
+.opt-route-focus-select{width:auto;min-width:96px;height:28px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;border:1px solid #d8deea;background:#fff}
+.opt-route-focus.is-active .opt-route-focus-select{border-color:#9db4f0;box-shadow:0 0 0 2px rgba(27,79,216,.08)}
+.opt-alloc-card{display:flex;flex-direction:column;min-height:96px;border:1px solid #e3e6ef;border-radius:8px;padding:8px 10px 6px 14px;background:#fff;position:relative;overflow:visible;transition:border-color .2s,box-shadow .2s,opacity .22s ease,background .22s ease,transform .18s ease,filter .22s ease}
 .opt-alloc-card:hover{border-color:#c5d4f7;box-shadow:0 4px 12px rgba(27,79,216,.07)}
+.opt-quota-focus-active .opt-alloc-card.opt-quota-dim{opacity:.34;filter:grayscale(.15);pointer-events:auto}
+.opt-quota-focus-active .opt-alloc-card.opt-quota-dim:hover{opacity:.5}
+.opt-quota-focus-active .opt-alloc-card.opt-quota-match{border-color:color-mix(in srgb,var(--opt-quota-color,#1b4fd8) 65%,#fff);background:color-mix(in srgb,var(--opt-quota-color,#1b4fd8) 8%,#fff);box-shadow:0 0 0 2px color-mix(in srgb,var(--opt-quota-color,#1b4fd8) 28%,transparent),0 6px 16px rgba(15,23,42,.08);transform:translateY(-1px);z-index:1}
+.opt-quota-focus-active .opt-alloc-card.opt-quota-match .opt-alloc-accent{width:5px}
+.opt-alloc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:8px;align-items:stretch}
 .opt-alloc-accent{position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--opt-quota-color,#7f7f7f)}
 .opt-alloc-card.opt-alloc-new{border-color:var(--opt-quota-color,#1f77b4);box-shadow:0 0 0 1px color-mix(in srgb,var(--opt-quota-color,#1f77b4) 25%,transparent)}
 .opt-alloc-card.opt-alloc-modified{box-shadow:0 0 0 2px color-mix(in srgb,var(--opt-warning,#e67e22) 35%,transparent)}
@@ -182,7 +202,7 @@
 .opt-alloc-card .opt-restore-row{padding:0;font-size:10px;color:var(--opt-info,#1b4fd8);margin-left:auto;flex-shrink:0}
 .opt-berth-cls-warn{font-size:11px;font-weight:700;color:#e67e22;white-space:nowrap}
 .opt-action-bar-spacer{display:none}
-.opt-footer-compact{margin-top:16px;padding-top:12px;border-top:1px solid #e3e6ef}
+.opt-footer-compact{margin-top:16px;padding:12px 16px;border-top:1px solid #e3e6ef;position:sticky;bottom:0;background:#fff;z-index:30;box-shadow:0 -6px 16px rgba(15,23,42,.06);border-radius:0 0 10px 10px}
 .opt-change-summary-panel{display:none;margin-bottom:10px;padding:8px 12px;background:#f8faff;border:1px solid #e3e6ef;border-radius:8px}
 .opt-change-summary-inner{display:flex;justify-content:center;align-items:center;gap:16px;flex-wrap:wrap}
 .opt-change-summary-item{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;color:#666}
@@ -195,8 +215,21 @@
 .opt-summary-negative strong{color:var(--opt-danger,#c0392b)}
 .opt-summary-neutral strong{color:#64748b}
 :root{--opt-success:#0a7c4e;--opt-warning:#e67e22;--opt-danger:#c0392b;--opt-info:#1b4fd8;--opt-neutral:#64748b}
+.opt-profile-mode{margin-bottom:14px;padding:12px 14px;background:#fff;border:1px groove #ddd;border-radius:8px}
+.opt-profile-mode-legend{font-size:13px;font-weight:700;color:#333;margin:0 0 8px}
+.opt-profile-mode-row{display:flex;align-items:center;flex-wrap:wrap;gap:16px}
+.opt-profile-radio{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#333;margin:0;cursor:pointer}
+.opt-profile-radio input{margin:0}
+.opt-profile-select-wrap{display:none;min-width:180px}
+.opt-profile-select-wrap.is-visible{display:block}
+.opt-profile-select-wrap label{display:block;font-size:11px;font-weight:600;color:#777;margin-bottom:4px;text-transform:uppercase}
 .opt-action-bar{display:flex;justify-content:flex-end;align-items:center;padding:0}
-.opt-action-bar .btn{min-width:160px;font-weight:600;border-radius:8px;padding:8px 18px}
+.opt-action-bar .btn{min-width:190px;font-weight:700;font-size:14px;border-radius:8px;padding:10px 20px;box-shadow:0 2px 6px rgba(0,0,0,.1);transition:transform .15s,box-shadow .15s}
+.opt-action-bar .btn i{margin-right:6px}
+.opt-action-bar .btn:not(:disabled):hover{transform:translateY(-1px);box-shadow:0 6px 14px rgba(0,0,0,.16)}
+.opt-action-bar .btn[disabled]{opacity:.55;box-shadow:none}
+#optReoptimizeBtn.opt-btn-attn{animation:optReoptimizeGlow 1.8s ease-in-out infinite}
+@keyframes optReoptimizeGlow{0%,100%{box-shadow:0 0 0 0 rgba(51,122,183,.5)}50%{box-shadow:0 0 0 9px rgba(51,122,183,0)}}
 .opt-cls-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:3px}
 .opt-cls-badge.cb-1a{background:#fdecea;color:#9b1c1c}
 .opt-cls-badge.cb-2a{background:#fef3c7;color:#92400e}
@@ -318,7 +351,7 @@
                                     id="fetchTrainBtn"
                                     class="btn btn-primary form-control"
                                 >
-                                    Fetch Train
+                                   Fetch Train Information
                                 </button>
                             </div>
 
@@ -341,7 +374,7 @@
 
                                 <li>
                                     <a href="#tab2" data-toggle="tab">
-                                        Upcoming Demand
+                                        Demand Analysis
                                     </a>
                                 </li>
 
@@ -586,9 +619,8 @@
 
                 <button
                     id="applyDemandBtn"
-                    class="btn btn-primary"
-                >
-                    Apply
+                    class="btn btn-primary">
+                    Apply Date Filter
                 </button>
 
             </div>
@@ -701,8 +733,18 @@
 
     </div>
 </div>
+<script>
+	// QUOTA_CODE -> full name (PRSDBA.DW_DIM_QUOTA: QUOTA_DESC, falling back to QUOTA_DISPLAY, resolved server-side).
+	var QUOTA_NAME_MAP = {};
+	<c:if test="${not empty jQuotaList and jQuotaList.length() gt 0}">
+	<c:forEach begin="0" end="${jQuotaList.length() - 1}" var="qIdx">
+	QUOTA_NAME_MAP["<c:out value='${fn:trim(jQuotaList.getJSONObject(qIdx).getString("quota_code"))}' escapeXml="true"/>"] = "<c:out value='${fn:trim(jQuotaList.getJSONObject(qIdx).getString("quota_name"))}' escapeXml="true"/>";
+	</c:forEach>
+	</c:if>
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.8' />"></script>
-<script src="<c:url value='/resources/js/setTrainProfileOptimization.js?version=23.4' />"></script>
-<script src="<c:url value='/resources/js/setTrainProfileOptimizationUtilization.js?version=23.1' />"></script>
-
+<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.26' />"></script>
+<script src="<c:url value='/resources/js/setTrainProfileOptimization.js?version=23.10' />"></script>
+<script src="<c:url value='/resources/js/setTrainProfileOptimizationUtilization.js?version=23.2' />"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
