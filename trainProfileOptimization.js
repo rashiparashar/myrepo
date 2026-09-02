@@ -1,5 +1,5 @@
 //var BASE_URL = 'http://localhost:8001';
-var BASE_URL = 'http://10.64.28.95:80/TPO';
+//var BASE_URL = 'http://10.64.28.95:80/TPO';
 var TRAIN_LIST = [];
 var SELECTED_TRAIN = null;
 var CURRENT_PROFILE = null;
@@ -8,7 +8,7 @@ var CURRENT_HOLIDAYS = [];
 var DEMAND_MODE = "daily";
 var CURRENT_DEMAND_ROWS = [];
 var CURRENT_DEMAND_DATE_KEY = '';
-var TRAIN_FETCH_IN_PROGRESS = false;
+
 function pick(obj, keys){
   for (var i=0;i<keys.length;i++){
     var k=keys[i];
@@ -16,6 +16,7 @@ function pick(obj, keys){
   }
   return null;
 }
+
 function firstObj(payload){
   if (!payload) return {};
   if (Array.isArray(payload)) return payload[0] || {};
@@ -35,13 +36,60 @@ function getTrainName(train){
 }
 function fmtDate(d){ return d.toISOString().slice(0,10); }
 function addDays(base,n){ var d=new Date(base); d.setDate(d.getDate()+n); return d; }
-function apiFetchDemand(num,siteId,startDate,endDate){
-  return fetch(BASE_URL + '/train/demand/' + encodeURIComponent(num) + '?site_id=' + encodeURIComponent(siteId) + '&start_date=' + encodeURIComponent(startDate) + '&end_date=' + encodeURIComponent(endDate))
-    .then(function(r){ if(!r.ok) throw new Error('demand'); return safeJson(r); });
+//function apiFetchDemand(num,siteId,startDate,endDate){
+//	  return fetch(BASE_URL + '/train/demand/' + encodeURIComponent(num) + '?site_id=' + encodeURIComponent(siteId) + '&start_date=' + encodeURIComponent(startDate) + '&end_date=' + encodeURIComponent(endDate))
+//	    .then(function(r){ if(!r.ok) throw new Error('demand'); return safeJson(r); });
+//	}
+function apiFetchDemand(num, siteId, startDate, endDate) {
+
+    var requestData = {
+        params: [
+            num,
+            siteId,
+            startDate,
+            endDate
+        ]
+    };
+
+    return getWebServiceDataTrain(
+        requestData,
+        '/newtemplatebasedmis/webapi/typeOne/getTrainDemand'
+    );
 }
 function distinctVals(rows,key){ var m={},o=[]; rows.forEach(function(r){var v=r[key]||''; if(v && !m[v]){m[v]=1;o.push(v);} }); return o.sort(); }
 function distinctValsAny(rows,keys){ var m={},o=[]; rows.forEach(function(r){ var v = pick(r, keys) || ''; if(v && !m[v]){m[v]=1;o.push(v);} }); return o.sort(); }
-function setSelectOptions(elId, values, allLabel){ var el=byId(elId); if(!el) return; var current = el.value; var options = allLabel ? [''] : []; values.forEach(function(v){ if(v !== '') options.push(v); }); el.innerHTML = options.map(function(v){ var label = v === '' ? allLabel : v; return '<option value="'+v+'">'+label+'</option>'; }).join(''); if (current && options.indexOf(current) !== -1) el.value = current; }
+function setSelectOptions(elId, values, allLabel, titleFn){ var el=byId(elId); if(!el) return; var current = el.value; var options = allLabel ? [''] : []; values.forEach(function(v){ if(v !== '') options.push(v); }); el.innerHTML = options.map(function(v){ var label = v === '' ? allLabel : v; var title = (v !== '' && typeof titleFn === 'function') ? titleFn(v) : ''; return '<option value="'+v+'"'+(title ? ' title="'+optEsc(title)+'"' : '')+'>'+label+'</option>'; }).join(''); if (current && options.indexOf(current) !== -1) el.value = current; }
+//function refreshDemandFilterOptions(rows){
+//    rows = rows || [];
+//
+//    // Route order stations
+//    var routeStations = [];
+//    var seen = {};
+//
+//    (CURRENT_PROFILE.route || []).forEach(function(r){
+//        var stn = r.STN_CODE;
+//        if(stn && !seen[stn]){
+//            seen[stn] = true;
+//            routeStations.push(stn);
+//        }
+//    });
+//
+//    setSelectOptions('demandFromStn', routeStations, 'All');
+//    setSelectOptions('demandToStn', routeStations, 'All');
+//
+//    setSelectOptions(
+//        'demandClass',
+//        distinctValsAny(rows,['CLS','CLASS']),
+//        'All Classes'
+//    );
+//
+//    setSelectOptions(
+//        'demandQuota',
+//        distinctValsAny(rows,['QUOTA_TYPE','QUOTA']),
+//        'All Quotas',
+//        quotaTitleIfDifferent
+//    );
+//}
 function refreshDemandFilterOptions(rows){
     rows = rows || [];
 
@@ -60,16 +108,62 @@ function refreshDemandFilterOptions(rows){
     setSelectOptions('demandFromStn', routeStations, 'All');
     setSelectOptions('demandToStn', routeStations, 'All');
 
+    // Classes from API demand data
+    var classes = distinctValsAny(rows, ['CLS','CLASS']);
+
     setSelectOptions(
         'demandClass',
-        distinctValsAny(rows,['CLS','CLASS']),
+        classes,
         'All Classes'
+    );
+
+    // Quotas initially show all quotas from API
+    var quotas = distinctValsAny(rows, ['QUOTA_TYPE','QUOTA']);
+
+    setSelectOptions(
+        'demandQuota',
+        quotas,
+        'All Quotas',
+        quotaTitleIfDifferent
+    );
+}
+function refreshDemandQuotaByClass(){
+
+    var rows = CURRENT_DEMAND_ROWS || [];
+
+    var selectedClass = byId('demandClass').value;
+
+    // If All Classes is selected, show all quotas
+    if(!selectedClass){
+
+        setSelectOptions(
+            'demandQuota',
+            distinctValsAny(rows, ['QUOTA_TYPE','QUOTA']),
+            'All Quotas',
+            quotaTitleIfDifferent
+        );
+
+        return;
+    }
+
+    // Filter API rows for selected class
+    var classRows = rows.filter(function(r){
+
+        return demandField(r, ['CLS','CLASS']) === selectedClass;
+
+    });
+
+    // Get only distinct quotas available for selected class
+    var quotas = distinctValsAny(
+        classRows,
+        ['QUOTA_TYPE','QUOTA']
     );
 
     setSelectOptions(
         'demandQuota',
-        distinctValsAny(rows,['QUOTA_TYPE','QUOTA']),
-        'All Quotas'
+        quotas,
+        'All Quotas',
+        quotaTitleIfDifferent
     );
 }
 function demandRowsFromPayload(payload){
@@ -114,27 +208,62 @@ function initDemandFilters(profile){
     setSelectOptions('demandClass', cls, 'All Classes');
     setSelectOptions('demandQuota', q, 'All Quotas');
 //    Added to show from stn based to stn dropdown
+//    byId('demandFromStn').onchange = function () {
+//
+//        var fromStn = this.value;
+//
+//        if (!fromStn) {
+//            setSelectOptions('demandToStn', routeStations, 'All');
+//            return;
+//        }
+//
+//        var idx = routeStations.indexOf(fromStn);
+//
+//        if (idx >= 0) {
+//            setSelectOptions(
+//                'demandToStn',
+//                routeStations.slice(idx + 1),
+//                'All'
+//            );
+//        }
+//    };
     byId('demandFromStn').onchange = function () {
 
         var fromStn = this.value;
 
         if (!fromStn) {
             setSelectOptions('demandToStn', routeStations, 'All');
-            return;
+        } else {
+            var idx = routeStations.indexOf(fromStn);
+
+            if (idx >= 0) {
+                setSelectOptions(
+                    'demandToStn',
+                    routeStations.slice(idx + 1),
+                    'All'
+                );
+            }
         }
 
-        var idx = routeStations.indexOf(fromStn);
-
-        if (idx >= 0) {
-            setSelectOptions(
-                'demandToStn',
-                routeStations.slice(idx + 1),
-                'All'
-            );
-        }
+        renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS);
     };
+    byId('demandClass').addEventListener('change', function () {
+        refreshDemandQuotaByClass();
+        renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS);
+    });
+    byId('demandQuota').addEventListener('change', function () {
+        renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS);
+    });
 
+    byId('demandToStn').addEventListener('change', function () {
+        renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS);
+    });
     var today = new Date();
+    var maxDate = addDays(today, 120);
+
+
+    byId('demandFrom').max = fmtDate(maxDate);
+    byId('demandTo').max   = fmtDate(maxDate);
 
     byId('demandFrom').value = fmtDate(addDays(today,61));
     byId('demandTo').value   = fmtDate(addDays(today,90));
@@ -173,9 +302,10 @@ function setDemandButtonLoading(isLoading){
   var applyBtn = byId('applyDemandBtn');
   if (!applyBtn) return;
   applyBtn.disabled = isLoading;
-  applyBtn.textContent = isLoading ? 'Loading...' : 'Apply';
+  applyBtn.textContent = isLoading ? 'Loading...' : 'Apply Date Filter';
 }
 function loadDemandForSelectedTrain(forceFetch){
+	
   if(!SELECTED_TRAIN) return Promise.resolve();
   if (!validateDemandDates()) return Promise.resolve();
 
@@ -188,7 +318,26 @@ function loadDemandForSelectedTrain(forceFetch){
     renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS);
     return Promise.resolve();
   }
+  var sd = byId('demandFrom').value;
+  var ed = byId('demandTo').value;
 
+  var fromDate = new Date(sd);
+  var toDate = new Date(ed);
+
+  var diffDays = Math.floor(
+    (toDate.getTime() - fromDate.getTime()) /
+    (1000 * 60 * 60 * 24)
+  );
+
+  if (diffDays < 0) {
+    alert('From Date cannot be greater than To Date.');
+    return Promise.resolve();
+  }
+
+  if (diffDays > 180) {
+    alert('Demand date range cannot be greater than 180 days.');
+    return Promise.resolve();
+  }
   var sd=byId('demandFrom').value, ed=byId('demandTo').value;
   setDemandButtonLoading(true);
 
@@ -213,51 +362,635 @@ function loadDemandForSelectedTrain(forceFetch){
 function byId(id){ return document.getElementById(id); }
 function safeJson(res){ return res.json().then(function(d){ return d && d.data ? d.data : d; }); }
 
-function apiFetchTrainList(){
-  var curDate = new Date().toISOString().slice(0,10);
-  return fetch(BASE_URL + '/train/list/?cur_date=' + encodeURIComponent(curDate)).then(function(r){ if(!r.ok) throw new Error('list'); return safeJson(r); });
+function apiFetchTrainList() {
+
+    var curDate = new Date().toISOString().slice(0, 10);
+
+    var requestData = {params: [curDate]};
+//    log.info("TrainList");
+    return getWebServiceDataTrain(
+        requestData,'/newtemplatebasedmis/webapi/typeOne/getTrainList');
+}
+function apiFetchTrainDetails(num, siteId, profileDate) {
+
+    var requestData = {
+        params: [
+            num,
+            siteId,
+            profileDate
+        ]
+    };
+
+    return getWebServiceDataTrain(
+        requestData,
+        '/newtemplatebasedmis/webapi/typeOne/getTrainDetails'
+    );
+}
+function apiFetchTrainProfile(num, siteId, profileDate) {
+
+    var requestData = {
+        params: [
+            num,
+            siteId,
+            profileDate
+        ]
+    };
+
+    return getWebServiceDataTrain(
+        requestData,
+        '/newtemplatebasedmis/webapi/typeOne/getTrainProfileData'
+    );
+}
+function apiFetchTrainUtilization(num,siteId,profileDate,fromDate,toDate) {
+    var requestData = {
+        params: [num,siteId,profileDate,fromDate,toDate] };
+    return getWebServiceDataTrain(
+        requestData,
+        '/newtemplatebasedmis/webapi/typeOne/getTrainUtilization'
+    );
+}
+
+//function apiFetchTrainOptimization(num, siteId, profileDate, fromDate, toDate, reoptDelta){
+//	var url = BASE_URL + '/train/train/optimize/' + encodeURIComponent(num);
+//	var body = {
+//		site_id: String(siteId),
+//		profile_date: profileDate,
+//		start_date: fromDate,
+//		end_date: toDate
+//	};
+//	if (reoptDelta && reoptDelta.edited_berths && Object.keys(reoptDelta.edited_berths).length) {
+//		body.edited_berths = reoptDelta.edited_berths;
+//	}
+//	if (reoptDelta && Array.isArray(reoptDelta.remote_added) && reoptDelta.remote_added.length) {
+//		body.remote_added = reoptDelta.remote_added;
+//	}
+//	if (reoptDelta && Array.isArray(reoptDelta.remote_removed) && reoptDelta.remote_removed.length) {
+//		body.remote_removed = reoptDelta.remote_removed;
+//	}
+//	return fetch(url, {
+//		method: 'POST',
+//		headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+//		body: JSON.stringify(body)
+//	}).then(function (r) {
+//		if (!r.ok) {
+//			throw new Error('optimize');
+//		}
+//		return r.json();
+//	});
+//}
+function apiFetchTrainOptimization(
+	    num,
+	    siteId,
+	    profileDate,
+	    fromDate,
+	    toDate,
+	    reoptDelta
+	) {
+
+	    var requestData = {
+	        params: [
+	            num,
+	            siteId,
+	            profileDate,
+	            fromDate,
+	            toDate
+	        ]
+	    };
+
+	    if (reoptDelta &&
+	        reoptDelta.edited_berths &&
+	        Object.keys(reoptDelta.edited_berths).length) {
+
+	        requestData.edited_berths =
+	            reoptDelta.edited_berths;
+	    }
+
+	    if (reoptDelta &&
+	        Array.isArray(reoptDelta.remote_added) &&
+	        reoptDelta.remote_added.length) {
+
+	        requestData.remote_added =
+	            reoptDelta.remote_added;
+	    }
+
+	    if (reoptDelta &&
+	        Array.isArray(reoptDelta.remote_removed) &&
+	        reoptDelta.remote_removed.length) {
+
+	        requestData.remote_removed =
+	            reoptDelta.remote_removed;
+	    }
+
+	    captureOptimizeRequestPayload(requestData);
+	    logOptimizationRequest('apiFetchTrainOptimization', reoptDelta, requestData);
+
+	    return getWebServiceDataTrain(
+	        requestData,
+	        '/newtemplatebasedmis/webapi/typeOne/getTrainOptimization'
+	    );
+	}
+
+function captureOptimizeRequestPayload(requestData) {
+  try {
+    OPT_PROFILE.lastRequestPayload = JSON.parse(JSON.stringify(requestData || {}));
+  } catch (e) {
+    OPT_PROFILE.lastRequestPayload = requestData || null;
   }
-function apiFetchTrainDetails(num, siteId, profileDate){
-  var curDate = new Date().toISOString().slice(0,10);
-  return fetch(BASE_URL + '/train/details/' + encodeURIComponent(num) + '?site_id=' + encodeURIComponent(siteId) + '&cur_date=' + encodeURIComponent(profileDate)).then(function(r){ if(!r.ok) throw new Error('details'); return safeJson(r); });
-}
-function apiFetchTrainProfile(num, siteId, profileDate){
-  var curDate = new Date().toISOString().slice(0,10);
-  return fetch(BASE_URL + '/train/profile/' + encodeURIComponent(num) + '?site_id=' + encodeURIComponent(siteId) + '&cur_date=' + encodeURIComponent(profileDate)).then(function(r){ if(!r.ok) throw new Error('profile'); return safeJson(r); });
 }
 
-function apiFetchTrainUtilization(num, siteId, profileDate, fromDate, toDate ){
-	return fetch(BASE_URL + '/train/utilization/' + encodeURIComponent(num) + '?site_id=' + encodeURIComponent(siteId) + '&profile_date=' + encodeURIComponent(profileDate) + '&start_date=' + encodeURIComponent(fromDate) + '&end_date=' + encodeURIComponent(toDate)).then(function(r){ if(!r.ok) throw new Error('utilization'); return safeJson(r); });
+function applySavedOptimizePayloadToState(payload, opts) {
+  var body = toOptimizeRequestPayload(payload);
+  OPT_STATE.persistedEditedBerths = Object.assign({}, body.edited_berths || {});
+  OPT_STATE.persistedRemoteAdded = ensureUniqueCodes(body.remote_added || []);
+  OPT_STATE.persistedRemoteRemoved = ensureUniqueCodes(body.remote_removed || []);
+  restoreRemoteStateFromPersisted();
+  // Skip when Show Optimization should keep the user's current UI dates.
+  if (!(opts && opts.skipDates)) {
+    applyOptDatesFromPayload(body);
+  }
 }
 
-function apiFetchTrainOptimization(num, siteId, profileDate, fromDate, toDate, reoptDelta){
-	var url = BASE_URL + '/train/train/optimize/' + encodeURIComponent(num);
-	var body = {
-		site_id: String(siteId),
-		profile_date: profileDate,
-		start_date: fromDate,
-		end_date: toDate
-	};
-	if (reoptDelta && reoptDelta.edited_berths && Object.keys(reoptDelta.edited_berths).length) {
-		body.edited_berths = reoptDelta.edited_berths;
-	}
-	if (reoptDelta && Array.isArray(reoptDelta.remote_added) && reoptDelta.remote_added.length) {
-		body.remote_added = reoptDelta.remote_added;
-	}
-	if (reoptDelta && Array.isArray(reoptDelta.remote_removed) && reoptDelta.remote_removed.length) {
-		body.remote_removed = reoptDelta.remote_removed;
-	}
-	return fetch(url, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-		body: JSON.stringify(body)
-	}).then(function (r) {
-		if (!r.ok) {
-			throw new Error('optimize');
-		}
-		return r.json();
-	});
+function applyOptDatesFromPayload(body) {
+  var fromDate = '';
+  var toDate = '';
+  if (Array.isArray(body.params) && body.params.length >= 5) {
+    fromDate = body.params[3] || '';
+    toDate = body.params[4] || '';
+  }
+  fromDate = fromDate || body.start_date || body.fromDate || '';
+  toDate = toDate || body.end_date || body.toDate || '';
+  if ($('#optFromDate').length && fromDate) {
+    $('#optFromDate').val(fromDate);
+    OPT_DATES_TOUCHED.opt = true;
+  }
+  if ($('#optToDate').length && toDate) {
+    $('#optToDate').val(toDate);
+    OPT_DATES_TOUCHED.opt = true;
+  }
 }
+
+/** Stamp UI from/to onto a saved-profile optimize payload (params[3]/params[4]). */
+function stampOptimizePayloadDates(payload, fromDate, toDate) {
+  if (!payload) {
+    return payload;
+  }
+  var next;
+  try {
+    next = JSON.parse(JSON.stringify(payload));
+  } catch (e) {
+    next = Object.assign({}, payload);
+    if (Array.isArray(payload.params)) {
+      next.params = payload.params.slice();
+    }
+  }
+  fromDate = fromDate || ($('#optFromDate').length ? $('#optFromDate').val() : '') || '';
+  toDate = toDate || ($('#optToDate').length ? $('#optToDate').val() : '') || '';
+  if (Array.isArray(next.params)) {
+    while (next.params.length < 5) {
+      next.params.push('');
+    }
+    if (fromDate) {
+      next.params[3] = fromDate;
+    }
+    if (toDate) {
+      next.params[4] = toDate;
+    }
+  }
+  // Do NOT set start_date/end_date on the request body — RequestParameters rejects unknown fields.
+  // Java proxy reads dates from params[3]/params[4] and maps them when calling TPO.
+  delete next.start_date;
+  delete next.end_date;
+  delete next.fromDate;
+  delete next.toDate;
+  return next;
+}
+
+function restoreDefaultOptDates() {
+  var range = getDefaultOptUtilDateRange();
+  OPT_DATES_TOUCHED.opt = false;
+  if ($('#optFromDate').length) {
+    $('#optFromDate').val(range.from);
+  }
+  if ($('#optToDate').length) {
+    $('#optToDate').val(range.to);
+  }
+}
+
+function postSavedOptimizePayload(payload) {
+  // Only fields RequestParameters accepts — strip start_date/end_date etc. that break Jackson.
+  var src = payload || {};
+  var requestData = {
+    params: Array.isArray(src.params) ? src.params.slice() : [],
+    edited_berths: src.edited_berths || {},
+    remote_added: src.remote_added || [],
+    remote_removed: src.remote_removed || []
+  };
+  captureOptimizeRequestPayload(requestData);
+  logOptimizationRequest('savedProfile', null, requestData);
+  return getWebServiceDataTrain(
+    requestData,
+    '/newtemplatebasedmis/webapi/typeOne/getTrainOptimization'
+  );
+}
+
+function unwrapTpoResponse(res) {
+  if (res && res.success === false) {
+    throw new Error(res.error || res.message || (res.error && res.error.message) || 'Request failed');
+  }
+  if (res && res.data != null && typeof res.data === 'object') {
+    return res.data;
+  }
+  return res;
+}
+
+function looksLikeProfileId(value) {
+  return /^\d{4,5}[_-]\d+$/.test(String(value || '').trim());
+}
+
+function profileIdFromValue(value) {
+  if (value == null || value === '') {
+    return '';
+  }
+  if (typeof value === 'string') {
+    var text = value.trim();
+    if (looksLikeProfileId(text)) {
+      return text;
+    }
+    if (text.charAt(0) === '{' || text.charAt(0) === '[') {
+      try {
+        return profileIdFromValue(JSON.parse(text));
+      } catch (e) {
+        return '';
+      }
+    }
+    return '';
+  }
+  if (Array.isArray(value)) {
+    return profileIdFromValue(value[0]);
+  }
+  if (typeof value === 'object') {
+    var direct = value.PROFILE_ID || value.profile_id || value.profileId;
+    if (direct != null && String(direct).trim()) {
+      return String(direct).trim();
+    }
+  }
+  return '';
+}
+
+function extractProfileIds(res) {
+  var root = unwrapTpoResponse(res);
+  if (root == null) {
+    root = res;
+  }
+  var rows = null;
+  if (Array.isArray(root)) {
+    rows = root;
+  } else if (root && Array.isArray(root.train_profile)) {
+    rows = root.train_profile;
+  } else if (root && root.data && Array.isArray(root.data.train_profile)) {
+    rows = root.data.train_profile;
+  } else if (res && res.data && Array.isArray(res.data.train_profile)) {
+    rows = res.data.train_profile;
+  }
+  if (!rows) {
+    return [];
+  }
+  var ids = [];
+  rows.forEach(function (item) {
+    var id = profileIdFromValue(item);
+    if (id && ids.indexOf(id) === -1) {
+      ids.push(id);
+    }
+  });
+  ids.sort(function (a, b) {
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+  return ids;
+}
+
+function profileListCacheKey(trainNo, siteId) {
+  return String(trainNo || '').trim() + '|' + String(siteId || '').trim();
+}
+
+function rememberSavedProfileId(trainNo, siteId, profileId) {
+  var id = String(profileId || '').trim();
+  if (!id) {
+    return;
+  }
+  var key = profileListCacheKey(trainNo, siteId);
+  var list = OPT_PROFILE.savedIdsByKey[key] || [];
+  if (list.indexOf(id) === -1) {
+    list.push(id);
+  }
+  OPT_PROFILE.savedIdsByKey[key] = list;
+}
+
+function mergeProfileIds(apiIds, trainNo, siteId) {
+  var key = profileListCacheKey(trainNo, siteId);
+  var source = (apiIds && apiIds.length) ? apiIds : (OPT_PROFILE.savedIdsByKey[key] || []);
+  var merged = [];
+  var seen = {};
+  source.forEach(function (id) {
+    var value = String(id || '').trim();
+    if (value && !seen[value]) {
+      seen[value] = true;
+      merged.push(value);
+    }
+  });
+  merged.sort(function (a, b) {
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+  if (apiIds && apiIds.length) {
+    OPT_PROFILE.savedIdsByKey[key] = merged;
+  }
+  return merged;
+}
+
+function nextOfficialProfileId(trainNo, existingIds) {
+  var prefix = String(trainNo || '').trim() + '_';
+  var max = 0;
+  (existingIds || []).forEach(function (id) {
+    var s = String(id || '').trim();
+    if (s.indexOf(prefix) !== 0) {
+      return;
+    }
+    var n = parseInt(s.substring(prefix.length), 10);
+    if (!isNaN(n) && n > max) {
+      max = n;
+    }
+  });
+  return prefix + (max + 1);
+}
+
+function unwrapLoadedProfileRecord(loaded) {
+  var root = unwrapTpoResponse(loaded);
+  if (!root) {
+    return null;
+  }
+  if (Array.isArray(root.train_opt_profile) && root.train_opt_profile.length) {
+    return root.train_opt_profile[0];
+  }
+  if (Array.isArray(root.train_profile) && root.train_profile.length) {
+    return root.train_profile[0];
+  }
+  if (Array.isArray(root) && root.length) {
+    return root[0];
+  }
+  return root;
+}
+
+function toOptimizeRequestPayload(loaded, trainNo) {
+  var src = unwrapLoadedProfileRecord(loaded) || {};
+  if (typeof src === 'string') {
+    try { src = JSON.parse(src); } catch (e) { src = {}; }
+  }
+  var nested = src.REQUEST_PAYLOAD || src.request_payload || src.requestPayload || src.payload;
+  if (typeof nested === 'string') {
+    try { nested = JSON.parse(nested); } catch (e) { nested = null; }
+  }
+  if (nested && typeof nested === 'object') {
+    src = Object.assign({}, src, nested);
+  }
+  if (Array.isArray(src.params) && src.params.length >= 5) {
+    return {
+      params: src.params.slice(),
+      edited_berths: src.edited_berths || {},
+      remote_added: src.remote_added || [],
+      remote_removed: src.remote_removed || []
+    };
+  }
+  var num = trainNo || getTrainNumber(SELECTED_TRAIN) || '';
+  return {
+    params: [
+      num,
+      src.site_id || src.siteId || getSiteId(SELECTED_TRAIN) || '',
+      src.profile_date || src.profileDate || (SELECTED_TRAIN && SELECTED_TRAIN.PROFILE_DATE) || '',
+      src.start_date || src.fromDate || $('#optFromDate').val() || '',
+      src.end_date || src.toDate || $('#optToDate').val() || ''
+    ],
+    edited_berths: src.edited_berths || {},
+    remote_added: src.remote_added || [],
+    remote_removed: src.remote_removed || []
+  };
+}
+
+function fetchOptimizationProfileList(trainNo, siteId) {
+  trainNo = String(trainNo || '').trim();
+  siteId = String(siteId || '').trim();
+  return getWebServiceDataTrain(
+    { params: [trainNo, siteId] },
+    '/newtemplatebasedmis/webapi/typeOne/getTrainProfiles'
+  ).then(function (res) {
+    if (typeof console !== 'undefined' && console.info) {
+      console.info('[TPO getProfiles]', trainNo, siteId, res);
+    }
+    return mergeProfileIds(extractProfileIds(res), trainNo, siteId);
+  });
+}
+
+function fetchOptimizationProfile(profileId) {
+  var trainNo = String(getTrainNumber(SELECTED_TRAIN) || '').trim();
+  var siteId = String(getSiteId(SELECTED_TRAIN) || '').trim();
+  return getWebServiceDataTrain(
+    { params: [trainNo, siteId, String(profileId || '').trim()] },
+    '/newtemplatebasedmis/webapi/typeOne/getTrainLoadProfile'
+  ).then(function (res) {
+    if (typeof console !== 'undefined' && console.info) {
+      console.info('[TPO loadProfile]', trainNo, siteId, profileId, res);
+    }
+    var loaded = unwrapLoadedProfileRecord(res);
+    if (!loaded) {
+      throw new Error('Profile not found');
+    }
+    return toOptimizeRequestPayload(loaded, trainNo);
+  });
+}
+
+function refreshOptimizationProfileList() {
+  var $select = $('#optSavedProfileSelect');
+  if (!$select.length) {
+    return Promise.resolve();
+  }
+  var trainNo = SELECTED_TRAIN ? String(getTrainNumber(SELECTED_TRAIN) || '').trim() : '';
+  var siteId = SELECTED_TRAIN ? String(getSiteId(SELECTED_TRAIN) || '').trim() : '';
+  if (!trainNo || !siteId) {
+    $select.html('<option value="">Fetch a train first</option>');
+    return Promise.resolve();
+  }
+  var seq = ++OPT_PROFILE.listRequestSeq;
+  $select.html('<option value="">Loading...</option>');
+  return fetchOptimizationProfileList(trainNo, siteId).then(function (ids) {
+    if (seq !== OPT_PROFILE.listRequestSeq) {
+      return;
+    }
+    var list = ids || [];
+    var html = '<option value="">Select Profile</option>';
+    list.forEach(function (id) {
+      html += '<option value="' + optEsc(id) + '"'
+        + (id === OPT_PROFILE.selectedProfileId ? ' selected' : '') + '>'
+        + optEsc(id) + '</option>';
+    });
+    if (!list.length) {
+      html = '<option value="">No saved profiles</option>';
+    }
+    $select.html(html);
+    if (OPT_PROFILE.selectedProfileId && list.indexOf(OPT_PROFILE.selectedProfileId) !== -1) {
+      $select.val(OPT_PROFILE.selectedProfileId);
+    }
+  }).catch(function (e) {
+    if (seq !== OPT_PROFILE.listRequestSeq) {
+      return;
+    }
+    console.error(e);
+    $select.html('<option value="">Unable to load profiles</option>');
+  });
+}
+
+function setOptProfileMode(mode) {
+  OPT_PROFILE.profileMode = mode === 'EDIT' ? 'EDIT' : 'CREATE';
+  OPT_PROFILE.selectedProfileId = '';
+  OPT_PROFILE.profilePayload = null;
+  OPT_PROFILE.lastRequestPayload = null;
+  clearOptimizationWorkspace();
+  var $wrap = $('#optProfileSelectWrap');
+  $wrap.toggleClass('is-visible', OPT_PROFILE.profileMode === 'EDIT');
+  $('input[name="optProfileMode"][value="' + OPT_PROFILE.profileMode + '"]').prop('checked', true);
+  if (OPT_PROFILE.profileMode === 'CREATE') {
+    restoreDefaultOptDates();
+  } else {
+    refreshOptimizationProfileList();
+  }
+}
+
+function loadSelectedOptimizationProfile(profileId) {
+  profileId = String(profileId || '').trim();
+  OPT_PROFILE.selectedProfileId = profileId;
+  OPT_PROFILE.profilePayload = null;
+  if (!profileId) {
+    clearOptimizationWorkspace();
+    return;
+  }
+  if (!SELECTED_TRAIN) {
+    alert('Please fetch train profile first');
+    return;
+  }
+  var $btn = $('#showOptimizationBtn');
+  $btn.prop('disabled', true).text('Loading Data...');
+  $('#optimizationContent').html(
+    '<div class="text-center" style="padding:24px;"><i class="fa fa-spinner fa-spin"></i> Loading saved profile...</div>'
+  );
+  fetchOptimizationProfile(profileId).then(function (payload) {
+    OPT_PROFILE.profilePayload = payload;
+    applySavedOptimizePayloadToState(payload);
+    return postSavedOptimizePayload(payload);
+  }).then(function (response) {
+    persistReoptimizeDelta({
+      edited_berths: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_berths) || {},
+      remote_added: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.remote_added) || [],
+      remote_removed: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.remote_removed) || []
+    });
+    drawOptimizationProfile(response);
+  }).catch(function (error) {
+    console.error(error);
+    alert(error.message || 'Failed to load saved profile');
+    $('#optimizationContent').html(
+      '<div class="alert alert-danger text-center">Failed to load saved profile.</div>'
+    );
+  }).then(function () {
+    $btn.prop('disabled', false).text('Show Optimization');
+  });
+}
+
+function saveOptimizationProfile(saveAsNew) {
+  if (!SELECTED_TRAIN) {
+    alert('Please fetch train profile first');
+    return;
+  }
+  if (!OPT_STATE.optimizationLoaded) {
+    alert('Run Show Optimization before saving a profile');
+    return;
+  }
+  if (!OPT_PROFILE.lastRequestPayload || !OPT_PROFILE.lastRequestPayload.params) {
+    alert('No optimization request payload is available to save');
+    return;
+  }
+  if (OPT_STATE.savingProfile) {
+    return;
+  }
+  if (getChangeCounts().total > 0) {
+    alert('Re-optimize your changes before saving the profile');
+    return;
+  }
+
+  var trainNo = getTrainNumber(SELECTED_TRAIN);
+  var siteId = getSiteId(SELECTED_TRAIN);
+  var payload = toOptimizeRequestPayload(OPT_PROFILE.lastRequestPayload, trainNo);
+  var isEdit = OPT_PROFILE.profileMode === 'EDIT';
+  var updateCurrent = isEdit && !saveAsNew;
+  if (updateCurrent && !OPT_PROFILE.selectedProfileId) {
+    alert('Select a profile to update');
+    return;
+  }
+
+  OPT_STATE.savingProfile = true;
+  OPT_STATE.savingAsNew = !!saveAsNew;
+  updateReoptimizeButton();
+
+  var profileIdPromise = updateCurrent
+    ? Promise.resolve(OPT_PROFILE.selectedProfileId)
+    : fetchOptimizationProfileList(trainNo, siteId).then(function (ids) {
+        return nextOfficialProfileId(trainNo, ids);
+      }).catch(function () {
+        return nextOfficialProfileId(trainNo, []);
+      });
+
+  profileIdPromise.then(function (profileId) {
+    if (!profileId || String(profileId).length > 10) {
+      throw new Error('Cannot allocate PROFILE_ID (max 10 chars) for train ' + trainNo);
+    }
+    var requestData = {
+      params: [
+        trainNo,
+        siteId,
+        SELECTED_TRAIN.PROFILE_DATE || (payload.params && payload.params[2]) || '',
+        (payload.params && payload.params[3]) || $('#optFromDate').val(),
+        (payload.params && payload.params[4]) || $('#optToDate').val(),
+        profileId,
+        ($('.username').text() || '').trim()
+      ],
+      edited_berths: payload.edited_berths || {},
+      remote_added: payload.remote_added || [],
+      remote_removed: payload.remote_removed || []
+    };
+    return getWebServiceDataTrain(
+      requestData,
+      '/newtemplatebasedmis/webapi/typeOne/saveTrainProfile'
+    ).then(function (res) {
+      unwrapTpoResponse(res);
+      rememberSavedProfileId(trainNo, siteId, profileId);
+      OPT_PROFILE.selectedProfileId = profileId;
+      OPT_PROFILE.profilePayload = payload;
+      alert(updateCurrent
+        ? ('Profile ' + profileId + ' updated successfully.')
+        : ('Profile ' + profileId + ' saved as a new profile.'));
+      refreshOptimizationProfileList();
+    });
+  })
+    .catch(function (e) {
+      console.error(e);
+      alert(e.message || 'Failed to save profile');
+    })
+    .then(function () {
+      OPT_STATE.savingProfile = false;
+      OPT_STATE.savingAsNew = false;
+      updateReoptimizeButton();
+    });
+}
+
+window.setOptProfileMode = setOptProfileMode;
+window.refreshOptimizationProfileList = refreshOptimizationProfileList;
+window.loadSelectedOptimizationProfile = loadSelectedOptimizationProfile;
+window.saveOptimizationProfile = saveOptimizationProfile;
 function formatTime(time) {
     if (!time) return '-';
     return time.toString().substring(0, 5); 
@@ -272,32 +1005,7 @@ function runningDaysHtml(data){
   for (var i=0; i<days.length; i++) if (data[keys[i]] === 'Y') out += '<span class="badge badge-success m-1">'+days[i]+'</span>';
   return out;
 }
-function setTrainFetchLoading(isLoading){
-	  TRAIN_FETCH_IN_PROGRESS = isLoading;
-	  var input = byId('trnNo');
-	  var btn = byId('fetchTrainBtn');
-	  var dropdown = byId('trainDropdown');
-	  if (input) input.disabled = isLoading;
-	  if (btn) {
-	    btn.disabled = isLoading;
-	    btn.textContent = isLoading ? 'Fetching...' : 'Fetch Train';
-	  }
-	  if (dropdown && isLoading) {
-	    dropdown.style.display = 'none';
-	  }
-	}
-	function bindFetchTrainUtilizationReset(){
-	  var btn = byId('fetchTrainBtn');
-	  if (!btn) return;
-	  btn.addEventListener('click', function(){
-	    if (typeof window.resetUtilizationDashboard === 'function') {
-	      window.resetUtilizationDashboard();
-	    }
-	    if (typeof window.resetOptimizationState === 'function') {
-	      window.resetOptimizationState();
-	    }
-	  });
-	}
+
 function renderDropdown(matches){
   var box = byId('trainDropdown');
   if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
@@ -362,7 +1070,7 @@ function searchTrain(){
   var siteId = getSiteId(SELECTED_TRAIN);
   if (!siteId) {
     btn.disabled = false;
-    btn.textContent = 'Fetch Train';
+    btn.textContent = 'Fetch Train Information';
     alert('Selected train is missing site id');
     return;
   }
@@ -370,7 +1078,7 @@ function searchTrain(){
   var trainNo = getTrainNumber(SELECTED_TRAIN);
   if (!trainNo) {
     btn.disabled = false;
-    btn.textContent = 'Fetch Train';
+    btn.textContent = 'Fetch Train Information';
     alert('Selected train is missing train number');
     return;
   }
@@ -391,23 +1099,79 @@ function searchTrain(){
     CURRENT_HOLIDAYS = [];
     CURRENT_DEMAND_DATE_KEY = '';
     loadDemandForSelectedTrain(true);
+    renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS);
     byId('profileDateText').textContent =
         (SELECTED_TRAIN.PROFILE_DATE || '').split('-').reverse().join('-') || '--';
     byId('trainDetailsSection').style.display = 'block';
     byId('tabsSection').style.display = 'block';
+    if (typeof refreshOptimizationProfileList === 'function') {
+      refreshOptimizationProfileList();
+    }
   }).catch(function(e){ console.error(e); alert('Failed to fetch train data'); })
-  .then(function(){ btn.disabled = false; btn.textContent = 'Fetch Train'; });
+  .then(function(){ btn.disabled = false; btn.textContent = 'Fetch Train Information'; });
 }
 
 
 function getUtilizationData(fromDate, toDate){
+	 var from = new Date(fromDate);
+	    var to = new Date(toDate);
+
+	    from.setHours(0, 0, 0, 0);
+	    to.setHours(0, 0, 0, 0);
+
+	    var diffDays = Math.ceil((to - from) / (1000 * 60 * 60 * 24));
+
+	    if (diffDays > 180) {
+	        alert("Utilization date range cannot exceed 180 days.");
+	        return Promise.resolve();
+	    }
+
 	return apiFetchTrainUtilization(SELECTED_TRAIN.train_number, SELECTED_TRAIN.site_id, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate);
 }
 
+function hasPersistedOptimizationConstraints() {
+  return Object.keys(OPT_STATE.persistedEditedBerths || {}).length > 0
+    || (OPT_STATE.persistedRemoteAdded || []).length > 0
+    || (OPT_STATE.persistedRemoteRemoved || []).length > 0;
+}
+
+function buildPersistedOnlyDelta() {
+  return {
+    edited_berths: Object.assign({}, OPT_STATE.persistedEditedBerths || {}),
+    remote_added: ensureUniqueCodes(OPT_STATE.persistedRemoteAdded || []),
+    remote_removed: ensureUniqueCodes(OPT_STATE.persistedRemoteRemoved || [])
+  };
+}
+
 function getOptimizationData(fromDate, toDate){
+	if (OPT_PROFILE.profileMode === 'EDIT') {
+		if (!OPT_PROFILE.selectedProfileId) {
+			return Promise.reject(new Error('Select a saved profile'));
+		}
+		var runEditWithUiDates = function (payload) {
+			payload = stampOptimizePayloadDates(payload, fromDate, toDate);
+			OPT_PROFILE.profilePayload = payload;
+			// Keep berths/remotes from the profile; do not overwrite UI dates.
+			applySavedOptimizePayloadToState(payload, { skipDates: true });
+			return postSavedOptimizePayload(payload);
+		};
+		if (OPT_PROFILE.profilePayload) {
+			return runEditWithUiDates(OPT_PROFILE.profilePayload);
+		}
+		return fetchOptimizationProfile(OPT_PROFILE.selectedProfileId).then(runEditWithUiDates);
+	}
 	var trainNo = getTrainNumber(SELECTED_TRAIN);
 	var siteId = getSiteId(SELECTED_TRAIN);
-	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate);
+	var delta = null;
+	if (hasPersistedOptimizationConstraints()) {
+		if (OPT_STATE.editedRows && OPT_STATE.editedRows.length) {
+			syncEditedRowsFromDom();
+			delta = buildCumulativeReoptimizeDelta(OPT_STATE.editedRows);
+		} else {
+			delta = buildPersistedOnlyDelta();
+		}
+	}
+	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, delta);
 }
 
 // Re-optimize uses same POST endpoint with edited_berths in JSON body.
@@ -418,7 +1182,21 @@ function getReoptimizeData(fromDate, toDate, delta) {
 }
 
 document.addEventListener('DOMContentLoaded', function(){
-  apiFetchTrainList().then(function(d){ TRAIN_LIST = d.train_list || []; }).catch(console.error);
+  var fetchBtn = byId('fetchTrainBtn');
+  byId('trnNo').disabled = true;
+  fetchBtn.disabled = true;
+  fetchBtn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Fetching Train List...';
+  apiFetchTrainList().then(function(d){TRAIN_LIST = d.train_list || [];
+    byId('trnNo').disabled = false;
+    fetchBtn.disabled = false;
+    fetchBtn.innerHTML = '<i class="fa fa-search"></i> Fetch Train Information';
+  })
+  .catch(function(err){
+    console.error(err);
+    byId('trnNo').disabled = false;
+    fetchBtn.disabled = false;
+    fetchBtn.innerHTML = '<i class="fa fa-search"></i> Fetch Train Information';
+  });
   bindAutocomplete();
   byId('fetchTrainBtn').addEventListener('click', function(e){ e.preventDefault(); searchTrain(); });
   byId('modeDaily').addEventListener('click', function(){ setMode('daily'); renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS); });
@@ -466,6 +1244,9 @@ var OPT_STATE = {
   hasChanges: false,
   optimizationLoaded: false,
   reoptimizing: false,
+  savingProfile: false,
+  savingAsNew: false,
+  syncingAllocations: false,
   nextRowId: 1,
   focusRowId: null,
   activeAddClass: null,
@@ -474,13 +1255,56 @@ var OPT_STATE = {
   expandedClasses: {},
   originalRemotes: [],
   remoteAdded: [],
-  remoteRemoved: []
+  remoteRemoved: [],
+  // Cumulative constraints sent across re-optimization passes (merged into each next request).
+  persistedEditedBerths: {},
+  persistedRemoteAdded: [],
+  persistedRemoteRemoved: [],
+  // Quota Focus Mode — multi-select legend filters (persists across re-optimize redraws).
+  focusedQuotas: [],
+  // Route Highlight Filter — From/To pair focus (compatible with quota focus).
+  routeFocus: { from: '', to: '' }
 };
 var OPT_DATES_TOUCHED = { opt: false, util: false };
 var OPT_DEFAULT_FROM_OFFSET = 61;
 var OPT_DEFAULT_TO_OFFSET = 90;
+var OPT_TOP_IMPACT_LIMIT = 10;
+
+var OPT_PROFILE = {
+  profileMode: 'CREATE',
+  selectedProfileId: '',
+  profilePayload: null,
+  lastRequestPayload: null,
+  savedIdsByKey: {},
+  listRequestSeq: 0
+};
+
+function logOptimizationRequest(action, reoptDelta, body) {
+  if (typeof console === 'undefined' || !console.info) {
+    return;
+  }
+  console.info('[TPO optimize] ' + action, {
+    persistedEditedBerths: Object.assign({}, OPT_STATE.persistedEditedBerths || {}),
+    persistedRemoteAdded: (OPT_STATE.persistedRemoteAdded || []).slice(),
+    persistedRemoteRemoved: (OPT_STATE.persistedRemoteRemoved || []).slice(),
+    requestDelta: reoptDelta ? {
+      edited_berths: Object.assign({}, (reoptDelta.edited_berths) || {}),
+      remote_added: (reoptDelta.remote_added || []).slice(),
+      remote_removed: (reoptDelta.remote_removed || []).slice()
+    } : null,
+    requestBody: body
+  });
+}
 
 function resetOptimizationState() {
+  OPT_PROFILE.selectedProfileId = '';
+  OPT_PROFILE.profilePayload = null;
+  OPT_PROFILE.lastRequestPayload = null;
+  clearOptimizationWorkspace();
+}
+window.resetOptimizationState = resetOptimizationState;
+
+function clearOptimizationWorkspace() {
   destroyOptimizationCharts();
   OPT_STATE.optimizer = null;
   OPT_STATE.currentUtil = [];
@@ -491,6 +1315,8 @@ function resetOptimizationState() {
   OPT_STATE.hasChanges = false;
   OPT_STATE.optimizationLoaded = false;
   OPT_STATE.reoptimizing = false;
+  OPT_STATE.savingProfile = false;
+  OPT_STATE.savingAsNew = false;
   OPT_STATE.nextRowId = 1;
   OPT_STATE.focusRowId = null;
   OPT_STATE.activeAddClass = null;
@@ -498,10 +1324,14 @@ function resetOptimizationState() {
   OPT_STATE.originalRemotes = [];
   OPT_STATE.remoteAdded = [];
   OPT_STATE.remoteRemoved = [];
+  OPT_STATE.persistedEditedBerths = {};
+  OPT_STATE.persistedRemoteAdded = [];
+  OPT_STATE.persistedRemoteRemoved = [];
+  OPT_STATE.focusedQuotas = [];
+  OPT_STATE.routeFocus = { from: '', to: '' };
   $('#optimizationContent').html('');
   updateReoptimizeButton();
 }
-window.resetOptimizationState = resetOptimizationState;
 
 function rowToBerthKey(r) {
   return String(r.CLASS || '') + '_' + String(r.QUOTA || '') + '_' + String(r.FROM || '') + '_' + String(r.TO || '');
@@ -567,6 +1397,36 @@ function optQuotaColorLight(quota, alpha) {
   var c = optQuotaColor(quota);
   alpha = alpha || '66';
   return c.length === 7 ? c + alpha : c;
+}
+
+// Full quota name for tooltips, sourced from PRSDBA.DW_DIM_QUOTA (QUOTA_NAME_MAP,
+// injected server-side in trainProfileOptimization.jsp: QUOTA_DESC, falling back to
+// QUOTA_DISPLAY, falling back to the code itself). Shared across all tabs of this page.
+function getQuotaFullName(quota) {
+  var q = String(quota || '').trim();
+  if (!q) {
+    return '';
+  }
+  var map = (typeof QUOTA_NAME_MAP !== 'undefined' && QUOTA_NAME_MAP) || {};
+  var name = map[q] || map[q.toUpperCase()];
+  return (name && String(name).trim()) || q;
+}
+
+// Full name only when it differs from the raw code — avoids a useless "GN" -> "GN" tooltip
+// on unmapped/failed-lookup codes (used as a titleFn for select option builders below).
+function quotaTitleIfDifferent(quota) {
+  var q = String(quota || '').trim();
+  if (!q) {
+    return '';
+  }
+  var full = getQuotaFullName(q);
+  return (full && full !== q) ? full : '';
+}
+
+// title="" helper — only sets a tooltip when the full name differs from the raw code.
+function quotaTitleAttr(quota) {
+  var full = quotaTitleIfDifferent(quota);
+  return full ? (' title="' + optEsc(full) + '"') : '';
 }
 
 // Allocation lifecycle: stable → modified → new → removed (removed always last).
@@ -653,9 +1513,12 @@ function countClassChanges(items) {
 
 function computeAllocationDelta(rows) {
   var editedBerths = {};
+  // Old keys abandoned by From/To/quota edits — drop from payload; do not send as 0.
+  var supersededKeys = [];
 
   (rows || []).forEach(function (r) {
     if (r.removed && r.origKey) {
+      // Explicit Remove still zeroes the original allocation.
       editedBerths[r.origKey] = 0;
       return;
     }
@@ -672,7 +1535,11 @@ function computeAllocationDelta(rows) {
     var origKey = r.origKey || newKey;
     var origBerths = optNum(OPT_STATE.originalBerths[origKey]);
     if (newKey !== origKey) {
-      editedBerths[origKey] = 0;
+      // Route/quota change (e.g. PQ NDLS→RJPB → PQRS NDLS→PNBE): send only the new key.
+      // Do not send previous combination as 0 berths.
+      if (supersededKeys.indexOf(origKey) === -1) {
+        supersededKeys.push(origKey);
+      }
       editedBerths[newKey] = optNum(r.BERTHS);
       return;
     }
@@ -681,11 +1548,102 @@ function computeAllocationDelta(rows) {
     }
   });
 
-  return { edited_berths: editedBerths };
+  return { edited_berths: editedBerths, superseded_keys: supersededKeys };
+}
+
+/**
+ * Merge current session edits with persisted constraints from prior re-optimizations so each
+ * request carries the full cumulative state (berths + remotes), not just the latest delta.
+ *
+ * Persisted berth keys are kept even when the UI row already matches the latest optimized
+ * baseline (otherwise consecutive re-optimizations drop earlier edits). Only remove a berth key
+ * when the user explicitly sets it back to the current baseline in this session, or when a
+ * From/To/quota edit supersedes the previous key (without sending it as 0).
+ */
+function buildCumulativeReoptimizeDelta(rows) {
+  var sessionDelta = computeAllocationDelta(rows);
+  var sessionBerths = sessionDelta.edited_berths || {};
+  var sessionRemote = computeRemoteDelta();
+
+  var editedBerths = Object.assign({}, OPT_STATE.persistedEditedBerths || {});
+  Object.keys(sessionBerths).forEach(function (key) {
+    editedBerths[key] = sessionBerths[key];
+  });
+  // Drop superseded previous keys entirely — never keep/send them as 0 from a route edit.
+  (sessionDelta.superseded_keys || []).forEach(function (key) {
+    delete editedBerths[key];
+  });
+  Object.keys(sessionBerths).forEach(function (key) {
+    if (optNum(sessionBerths[key]) === optNum(OPT_STATE.originalBerths[key])) {
+      delete editedBerths[key];
+    }
+  });
+
+  var added = ensureUniqueCodes((OPT_STATE.persistedRemoteAdded || []).concat(sessionRemote.remote_added || []));
+  var removed = ensureUniqueCodes((OPT_STATE.persistedRemoteRemoved || []).concat(sessionRemote.remote_removed || []));
+
+  // Latest session intent wins when the same remote is toggled add/remove across passes.
+  (sessionRemote.remote_added || []).forEach(function (code) {
+    removed = removed.filter(function (c) { return c !== code; });
+    if (added.indexOf(code) === -1) {
+      added.push(code);
+    }
+  });
+  (sessionRemote.remote_removed || []).forEach(function (code) {
+    added = added.filter(function (c) { return c !== code; });
+    if (removed.indexOf(code) === -1) {
+      removed.push(code);
+    }
+  });
+  added = ensureUniqueCodes(added.filter(function (c) { return removed.indexOf(c) === -1; }));
+
+  return {
+    edited_berths: editedBerths,
+    remote_added: added,
+    remote_removed: removed
+  };
+}
+
+function persistReoptimizeDelta(delta) {
+  OPT_STATE.persistedEditedBerths = Object.assign({}, (delta && delta.edited_berths) || {});
+  OPT_STATE.persistedRemoteAdded = ensureUniqueCodes((delta && delta.remote_added) || []);
+  OPT_STATE.persistedRemoteRemoved = ensureUniqueCodes((delta && delta.remote_removed) || []);
+}
+
+function restoreRemoteStateFromPersisted() {
+  OPT_STATE.remoteAdded = ensureUniqueCodes(OPT_STATE.persistedRemoteAdded || []);
+  OPT_STATE.remoteRemoved = ensureUniqueCodes(OPT_STATE.persistedRemoteRemoved || []);
+}
+
+/**
+ * Count only remote edits made since the last successful re-optimize.
+ * Persisted remotes (already applied) must not keep Re-Optimize enabled or block Download.
+ */
+function getPendingRemoteChangeCount() {
+  var added = ensureUniqueCodes(OPT_STATE.remoteAdded || []);
+  var removed = ensureUniqueCodes(OPT_STATE.remoteRemoved || []);
+  var persistedAdded = ensureUniqueCodes(OPT_STATE.persistedRemoteAdded || []);
+  var persistedRemoved = ensureUniqueCodes(OPT_STATE.persistedRemoteRemoved || []);
+
+  var pendingAdded = added.filter(function (code) {
+    return persistedAdded.indexOf(code) === -1;
+  }).length;
+  var pendingRemoved = removed.filter(function (code) {
+    return persistedRemoved.indexOf(code) === -1;
+  }).length;
+  // User undid a previously applied constraint (remove from added / restore a removed remote).
+  var revertedAdded = persistedAdded.filter(function (code) {
+    return added.indexOf(code) === -1;
+  }).length;
+  var revertedRemoved = persistedRemoved.filter(function (code) {
+    return removed.indexOf(code) === -1;
+  }).length;
+
+  return pendingAdded + pendingRemoved + revertedAdded + revertedRemoved;
 }
 
 function getRemoteChangeCount() {
-  return (OPT_STATE.remoteAdded || []).length + (OPT_STATE.remoteRemoved || []).length;
+  return getPendingRemoteChangeCount();
 }
 
 function getChangeCounts() {
@@ -693,7 +1651,7 @@ function getChangeCounts() {
   var newCount = rows.filter(function (r) { return r.isNew && !r.removed; }).length;
   var modifiedCount = rows.filter(function (r) { return !r.isNew && !r.removed && isRowModified(r); }).length;
   var deletedCount = rows.filter(function (r) { return r.removed; }).length;
-  var remoteChanges = getRemoteChangeCount();
+  var remoteChanges = getPendingRemoteChangeCount();
   return {
     total: newCount + modifiedCount + deletedCount + remoteChanges,
     newCount: newCount,
@@ -709,6 +1667,10 @@ function getNetBerthChange() {
   Object.keys(delta.edited_berths || {}).forEach(function (key) {
     var orig = optNum(OPT_STATE.originalBerths[key]);
     net += optNum(delta.edited_berths[key]) - orig;
+  });
+  // Route/quota edits abandon the original key without sending 0 — still count that loss in net.
+  (delta.superseded_keys || []).forEach(function (key) {
+    net -= optNum(OPT_STATE.originalBerths[key]);
   });
   return net;
 }
@@ -762,18 +1724,211 @@ function getOptStationOptions() {
   return stations;
 }
 
+function getTrainOriginStation() {
+  var stations = getOptStationOptions();
+  return stations.length ? stations[0] : '';
+}
+
+function getTrainDestinationStation() {
+  var stations = getOptStationOptions();
+  return stations.length ? stations[stations.length - 1] : '';
+}
+
+/** Stations allowed as remotes — never include the train's last (destination) station. */
+function getRemoteStationOptions() {
+  var stations = getOptStationOptions();
+  var last = getTrainDestinationStation();
+  if (!last) {
+    return stations;
+  }
+  return stations.filter(function (code) {
+    return code !== last;
+  });
+}
+
+function isRoadSideRoute(from, to) {
+  var origin = getTrainOriginStation();
+  var dest = getTrainDestinationStation();
+  from = String(from || '').trim();
+  to = String(to || '').trim();
+  return !!(origin && dest && from && to && from === origin && to !== dest);
+}
+
+function hasRsSuffix(quota) {
+  var q = String(quota || '').trim().toUpperCase();
+  return q.length > 2 && q.slice(-2) === 'RS';
+}
+
+/** Strip every trailing RS so GNRS / GNRSRS / GNRSRSRS all normalize to GN. */
+function quotaBaseCode(quota) {
+  var q = String(quota || '').trim().toUpperCase();
+  while (q.length > 2 && q.slice(-2) === 'RS') {
+    q = q.slice(0, -2);
+  }
+  return q;
+}
+
+/** Road-side form of a quota. Never doubles RS (GNRS stays GNRS, not GNRSRS). */
+function quotaRsCode(quota) {
+  var base = quotaBaseCode(quota);
+  return base ? (base + 'RS') : '';
+}
+
+function findQuotaInList(code, list) {
+  var target = String(code || '').trim().toUpperCase();
+  if (!target) {
+    return '';
+  }
+  var i;
+  for (i = 0; i < (list || []).length; i++) {
+    if (String(list[i] || '').trim().toUpperCase() === target) {
+      return list[i];
+    }
+  }
+  if (typeof QUOTA_NAME_MAP !== 'undefined' && QUOTA_NAME_MAP) {
+    if (QUOTA_NAME_MAP[code]) {
+      return code;
+    }
+    if (QUOTA_NAME_MAP[target]) {
+      return target;
+    }
+  }
+  return '';
+}
+
+/**
+ * Origin → intermediate must use an RS-suffixed quota (GN→GNRS, HO→HORS, …).
+ * If RS is already present, keep/normalize it — never append RS again.
+ * Full Origin → Destination (or non-origin from) uses the base quota when an RS code is selected.
+ */
+function resolveQuotaForRoute(quota, from, to, availableQuotas) {
+  quota = String(quota || '').trim();
+  if (!quota || !from || !to) {
+    return quota;
+  }
+  var available = availableQuotas || getOptQuotaOptions();
+  if (isRoadSideRoute(from, to)) {
+    // Already RS (or doubled like GNRSRS) → normalize to a single RS suffix.
+    var rs = quotaRsCode(quota);
+    return findQuotaInList(rs, available) || rs;
+  }
+  if (hasRsSuffix(quota)) {
+    var base = quotaBaseCode(quota);
+    return findQuotaInList(base, available) || base;
+  }
+  return quota;
+}
+
+function applyRoadSideQuotaRules(rows, onlyRowId) {
+  var available = getOptQuotaOptions();
+  var changed = false;
+  (rows || []).forEach(function (r) {
+    if (!r || r.removed || !r.QUOTA || !r.FROM || !r.TO) {
+      return;
+    }
+    if (onlyRowId != null && r._rowId !== onlyRowId) {
+      return;
+    }
+    // Do not rewrite untouched optimizer rows (that falsely marks other classes as "Quota Changed").
+    var orig = r.origSnapshot;
+    if (!orig && r._rowId != null) {
+      var live = (OPT_STATE.editedRows || []).filter(function (x) {
+        return x._rowId === r._rowId;
+      })[0];
+      orig = live && live.origSnapshot;
+    }
+    if (orig && r.QUOTA === orig.QUOTA && r.FROM === orig.FROM && r.TO === orig.TO) {
+      return;
+    }
+    var resolved = resolveQuotaForRoute(r.QUOTA, r.FROM, r.TO, available);
+    if (resolved && resolved !== r.QUOTA) {
+      r.QUOTA = resolved;
+      changed = true;
+      if (available.indexOf(resolved) === -1) {
+        available.push(resolved);
+      }
+    }
+  });
+  return changed;
+}
+
+function allocationComboKey(quota, from, to) {
+  return String(quota || '').trim().toUpperCase() + '|'
+    + String(from || '').trim().toUpperCase() + '|'
+    + String(to || '').trim().toUpperCase();
+}
+
+function getTakenAllocationCombos(rows, cls, excludeRowId) {
+  var taken = {};
+  (rows || []).forEach(function (r) {
+    if (!r || r.removed || r._rowId === excludeRowId) {
+      return;
+    }
+    if (String(r.CLASS || '') !== String(cls || '')) {
+      return;
+    }
+    if (!r.QUOTA || !r.FROM || !r.TO) {
+      return;
+    }
+    taken[allocationComboKey(r.QUOTA, r.FROM, r.TO)] = true;
+  });
+  return taken;
+}
+
+function isDuplicateAllocation(rows, row) {
+  if (!row || row.removed || !row.QUOTA || !row.FROM || !row.TO) {
+    return false;
+  }
+  var key = allocationComboKey(row.QUOTA, row.FROM, row.TO);
+  return !!getTakenAllocationCombos(rows, row.CLASS, row._rowId)[key];
+}
+
+function getAvailableQuotasForRow(row, allQuotas, rows) {
+  var quotas = (allQuotas || []).slice();
+  if (!row || !row.FROM || !row.TO) {
+    return quotas;
+  }
+  var taken = getTakenAllocationCombos(rows || OPT_STATE.editedRows, row.CLASS, row._rowId);
+  return quotas.filter(function (q) {
+    if (row.QUOTA && String(q) === String(row.QUOTA)) {
+      return true;
+    }
+    return !taken[allocationComboKey(q, row.FROM, row.TO)];
+  });
+}
+
+function isUnknownQuotaDescription(desc) {
+  // Hide placeholder quota names from dropdowns (prefix match, case-insensitive).
+  return /^(UNKNOWN|UNDEFINED)/i.test(String(desc || '').trim());
+}
+
 function getOptQuotaOptions() {
   var quotas = [];
-  if (CURRENT_PROFILE && CURRENT_PROFILE.berths) {
+  var map = (typeof QUOTA_NAME_MAP !== 'undefined' && QUOTA_NAME_MAP) || {};
+  if (map) {
+    Object.keys(map).forEach(function (q) {
+      if (!q) {
+        return;
+      }
+      // Display-only: hide quotas whose description starts with UNKNOWN / UNDEFINED.
+      if (isUnknownQuotaDescription(map[q])) {
+        return;
+      }
+      quotas.push(q);
+    });
+  }
+  if (!quotas.length && CURRENT_PROFILE && CURRENT_PROFILE.berths) {
     CURRENT_PROFILE.berths.forEach(function (b) {
       var q = b.QUOTA_TYPE || b.QUOTA || '';
-      if (q && quotas.indexOf(q) === -1) {
+      if (q && quotas.indexOf(q) === -1 && !isUnknownQuotaDescription(map[q])) {
         quotas.push(q);
       }
     });
   }
   OPT_STATE.editedRows.forEach(function (r) {
-    if (r.QUOTA && quotas.indexOf(r.QUOTA) === -1) {
+    // Do not reintroduce UNKNOWN-description quotas into shared dropdown lists.
+    // optSelectOptions still preserves a card's current selected value when needed.
+    if (r.QUOTA && quotas.indexOf(r.QUOTA) === -1 && !isUnknownQuotaDescription(map[r.QUOTA])) {
       quotas.push(r.QUOTA);
     }
   });
@@ -798,7 +1953,7 @@ function getOptClassOptions() {
   return classes.sort();
 }
 
-function optSelectOptions(values, selected, placeholder, preserveOrder) {
+function optSelectOptions(values, selected, placeholder, preserveOrder, titleFn) {
   var list = (values || []).slice();
   if (selected && list.indexOf(selected) === -1) {
     list.push(selected);
@@ -808,9 +1963,15 @@ function optSelectOptions(values, selected, placeholder, preserveOrder) {
   }
   var html = placeholder ? '<option value="">' + optEsc(placeholder) + '</option>' : '';
   list.forEach(function (v) {
-    html += '<option value="' + optEsc(v) + '"' + (String(v) === String(selected) ? ' selected' : '') + '>' + optEsc(v) + '</option>';
+    var title = typeof titleFn === 'function' ? titleFn(v) : '';
+    html += '<option value="' + optEsc(v) + '"' + (String(v) === String(selected) ? ' selected' : '') + (title ? ' title="' + optEsc(title) + '"' : '') + '>' + optEsc(v) + '</option>';
   });
   return html;
+}
+
+// Options list for a quota <select> where each <option> is titled with the full quota name.
+function optQuotaSelectOptions(values, selected, placeholder) {
+  return optSelectOptions(values, selected, placeholder, false, quotaTitleIfDifferent);
 }
 
 function readEditedRowsFromDom() {
@@ -839,6 +2000,7 @@ function validateOptAllocations(rows) {
     alert('Add at least one allocation row.');
     return false;
   }
+  applyRoadSideQuotaRules(rows);
   for (i = 0; i < rows.length; i++) {
     var r = rows[i];
     if (r.removed) {
@@ -859,6 +2021,15 @@ function validateOptAllocations(rows) {
     }
     if (optNum(r.BERTHS) < 0) {
       rowErrors.push('Berths must be 0 or greater');
+    }
+    if (r.QUOTA && r.FROM && r.TO && isRoadSideRoute(r.FROM, r.TO)) {
+      var expectedRs = quotaRsCode(r.QUOTA);
+      if (String(r.QUOTA).toUpperCase() !== String(expectedRs).toUpperCase()) {
+        rowErrors.push('Origin to intermediate must use RS quota (' + expectedRs + ')');
+      }
+    }
+    if (isDuplicateAllocation(rows, r)) {
+      rowErrors.push('Duplicate quota + route already exists in this class');
     }
     if (rowErrors.length) {
       errors.push({ rowId: r._rowId, messages: rowErrors });
@@ -892,21 +2063,74 @@ function markOptCardErrors(rowId, messages) {
 }
 
 
+function restoreSaveProfileButton($saveBtn, canSave, hasPendingChanges, labelHtml, idleTitle) {
+  if (!$saveBtn.length) {
+    return;
+  }
+  if (OPT_STATE.savingProfile) {
+    $saveBtn.prop('disabled', true)
+      .html('<i class="fa fa-spinner fa-spin"></i> Saving...')
+      .attr('title', 'Save in progress');
+    return;
+  }
+  var title = idleTitle || 'Save the last optimization request as a train profile';
+  if (!OPT_STATE.optimizationLoaded) {
+    title = 'Run Show Optimization before saving a profile';
+  } else if (hasPendingChanges) {
+    title = 'Re-optimize your changes before saving the profile';
+  } else if (!OPT_PROFILE.lastRequestPayload) {
+    title = 'No optimization request is available to save';
+  }
+  $saveBtn.prop('disabled', !canSave)
+    .html(labelHtml || '<i class="fa fa-save"></i> Save Profile')
+    .attr('title', title);
+}
+
 function updateReoptimizeButton() {
   var $btn = $('#optReoptimizeBtn');
-  if (!$btn.length) {
-    return;
-  }
-  if (OPT_STATE.reoptimizing) {
-    $btn.prop('disabled', true).text('Re-Optimizing...');
-    return;
-  }
+  var $downloadBtn = $('#optDownloadOptimizedProfilePdfBtn');
+  var $saveBtn = $('#optSaveProfileBtn');
+  var $saveAsNewBtn = $('#optSaveAsNewProfileBtn');
   var counts = getChangeCounts();
-  var label = 'Re-Optimize';
-  if (counts.total > 0) {
-    label = 'Re-Optimize (' + counts.total + (counts.total === 1 ? ' Change' : ' Changes') + ')';
+  var hasPendingChanges = counts.total > 0 && OPT_STATE.optimizationLoaded;
+  var canSave = OPT_STATE.optimizationLoaded
+    && !!OPT_PROFILE.lastRequestPayload
+    && !hasPendingChanges
+    && !OPT_STATE.reoptimizing;
+  var isEdit = OPT_PROFILE.profileMode === 'EDIT';
+
+  if (OPT_STATE.reoptimizing) {
+    if ($btn.length) {
+      $btn.removeClass('opt-btn-attn').prop('disabled', true)
+        .html('<i class="fa fa-spinner fa-spin"></i> Re-Optimizing...')
+        .attr('title', 'Re-optimization in progress\u2026');
+    }
+    $downloadBtn.prop('disabled', true);
+    restoreSaveProfileButton($saveBtn, false, hasPendingChanges);
+    restoreSaveProfileButton($saveAsNewBtn, false, hasPendingChanges,
+      '<i class="fa fa-copy"></i> Save as New Profile');
+    $saveAsNewBtn.toggle(isEdit);
+    return;
   }
-  $btn.prop('disabled', counts.total === 0 || !OPT_STATE.optimizationLoaded).text(label);
+  if ($btn.length) {
+    var label = '<i class="fa fa-magic"></i> Re-Optimize';
+    var title = 'Edit a berth allocation or remotes above to enable Re-Optimize';
+    if (hasPendingChanges) {
+      label = '<i class="fa fa-magic"></i> Re-Optimize (' + counts.total + (counts.total === 1 ? ' Change' : ' Changes') + ')';
+      title = 'Apply your ' + counts.total + ' unsaved change' + (counts.total === 1 ? '' : 's') + ' and re-run the optimizer';
+    }
+    $btn.prop('disabled', !hasPendingChanges).html(label).attr('title', title)
+      .toggleClass('opt-btn-attn', hasPendingChanges);
+  }
+
+  $downloadBtn.prop('disabled', !OPT_STATE.optimizationLoaded || hasPendingChanges);
+  restoreSaveProfileButton($saveBtn, canSave, hasPendingChanges,
+    '<i class="fa fa-save"></i> Save Profile',
+    isEdit ? 'Update the selected profile' : 'Save as a new train profile');
+  restoreSaveProfileButton($saveAsNewBtn, canSave && isEdit && !!OPT_PROFILE.selectedProfileId, hasPendingChanges,
+    '<i class="fa fa-copy"></i> Save as New Profile',
+    'Save the current work as the next profile id');
+  $saveAsNewBtn.toggle(isEdit);
   updateChangeSummaryPanel();
 }
 
@@ -979,12 +2203,16 @@ function refreshAllocationCardStates() {
     $card.attr('data-is-new', isNew ? '1' : '0');
     $card.attr('data-removed', removed ? '1' : '0');
     $card.attr('data-quota', row.QUOTA || '');
+    $card.attr('data-from', row.FROM || '');
+    $card.attr('data-to', row.TO || '');
     $card.css('--opt-quota-color', removed ? '#94a3b8' : qColor);
+    var quotaFullName = row.QUOTA ? getQuotaFullName(row.QUOTA) : '';
     $card.find('.opt-quota-pill').text(row.QUOTA || 'Quota').css({
       color: removed ? '#94a3b8' : qColor,
       borderColor: removed ? '#94a3b8' : qColor,
       background: (removed ? '#94a3b8' : qColor) + '18'
-    });
+    }).attr('title', quotaFullName && quotaFullName !== row.QUOTA ? quotaFullName : null);
+    $card.find('.opt-edit-quota').attr('title', quotaFullName && quotaFullName !== row.QUOTA ? quotaFullName : null);
     $card.find('.opt-edit-quota, .opt-edit-from, .opt-edit-to, .opt-edit-berths').prop('disabled', removed || OPT_STATE.reoptimizing);
     var $badge = $card.find('.opt-alloc-badge');
     var changeLabel = getAllocationChangeLabel(row);
@@ -1007,14 +2235,72 @@ function refreshAllocationCardStates() {
   });
   updateClassHeaders();
   updateReoptimizeButton();
+  applyQuotaFocusMode({ scroll: false });
 }
 
-function syncAndRefreshChanges() {
-  syncEditedRowsFromDom();
-  refreshAllocationCardStates();
-  if ($('#optCompareClassPills').length) {
-    renderOptBerthCompare();
+function syncAndRefreshChanges(changedRowId) {
+  if (OPT_STATE.syncingAllocations) {
+    return;
   }
+  OPT_STATE.syncingAllocations = true;
+  try {
+    syncEditedRowsFromDom();
+    var rsChanged = applyRoadSideQuotaRules(OPT_STATE.editedRows, changedRowId);
+    if (rsChanged) {
+      refreshBerthTableSection();
+      return;
+    }
+    refreshAllocationCardStates();
+    refreshAllocationDropdownFilters();
+    flagLiveAllocationValidationErrors();
+    if ($('#optCompareClassPills').length) {
+      renderOptBerthCompare();
+    }
+  } finally {
+    OPT_STATE.syncingAllocations = false;
+  }
+}
+
+function flagLiveAllocationValidationErrors() {
+  clearOptInlineErrors();
+  (OPT_STATE.editedRows || []).forEach(function (r) {
+    if (!r || r.removed || !r.QUOTA || !r.FROM || !r.TO) {
+      return;
+    }
+    var msgs = [];
+    if (isDuplicateAllocation(OPT_STATE.editedRows, r)) {
+      msgs.push('Duplicate quota + route already exists in this class');
+    }
+    if (isRoadSideRoute(r.FROM, r.TO) && String(r.QUOTA).toUpperCase() !== String(quotaRsCode(r.QUOTA)).toUpperCase()) {
+      msgs.push('Origin to intermediate must use RS quota (' + quotaRsCode(r.QUOTA) + ')');
+    }
+    if (msgs.length) {
+      markOptCardErrors(r._rowId, msgs);
+    }
+  });
+}
+
+function refreshAllocationDropdownFilters() {
+  var rows = OPT_STATE.editedRows || [];
+  var allQuotas = getOptQuotaOptions();
+  $('#optBerthTableWrap .opt-alloc-card[data-row-id]').each(function () {
+    var $card = $(this);
+    var rowId = parseInt($card.attr('data-row-id'), 10);
+    var row = rows.find(function (r) { return r._rowId === rowId; });
+    if (!row || row.removed) {
+      return;
+    }
+    var availableQuotas = getAvailableQuotasForRow(row, allQuotas, rows);
+    var $quota = $card.find('.opt-edit-quota');
+    var current = row.QUOTA || '';
+    $quota.html(optQuotaSelectOptions(availableQuotas, current, 'Quota'));
+    if (String($quota.val() || '') !== String(current || '')) {
+      $quota.val(current);
+    }
+    $card.attr('data-quota', current);
+    $card.attr('data-from', row.FROM || '');
+    $card.attr('data-to', row.TO || '');
+  });
 }
 
 function focusNewAllocationCard() {
@@ -1089,20 +2375,12 @@ function runReoptimize() {
     return;
   }
 
-  var delta = computeAllocationDelta(rows);
-  var remoteDelta = computeRemoteDelta();
-  if (remoteDelta.remote_added.length) {
-    delta.remote_added = remoteDelta.remote_added;
-  }
-  if (remoteDelta.remote_removed.length) {
-    delta.remote_removed = remoteDelta.remote_removed;
-  }
-  var changeCount = Object.keys(delta.edited_berths).length
-    + remoteDelta.remote_added.length
-    + remoteDelta.remote_removed.length;
-  if (changeCount === 0) {
+  // Only pending (unsaved) edits should enable a re-optimize pass — not already-persisted remotes/berths.
+  if (getChangeCounts().total === 0) {
     return;
   }
+
+  var delta = buildCumulativeReoptimizeDelta(rows);
 
   var fromDate = $('#optFromDate').val();
   var toDate = $('#optToDate').val();
@@ -1115,6 +2393,7 @@ function runReoptimize() {
 
   getReoptimizeData(fromDate, toDate, delta)
     .then(function (response) {
+      persistReoptimizeDelta(delta);
       drawOptimizationProfile(response);
     })
     .catch(function (e) {
@@ -1139,6 +2418,27 @@ function bindOptimizationEditorEvents() {
   $doc.on('click.optEditor', '#optimizationContainer #optRemoteAddBtn', function (e) {
     e.preventDefault();
     addRemoteStationFromInput();
+  });
+
+  $doc.on('click.optEditor', '#optimizationContainer .opt-quota-legend-item[data-quota]', function (e) {
+    e.preventDefault();
+    toggleQuotaFocus(String($(this).attr('data-quota') || ''));
+  });
+
+  $doc.on('click.optEditor', '#optimizationContainer #optQuotaFocusReset', function (e) {
+    e.preventDefault();
+    clearQuotaFocus();
+  });
+
+  $doc.on('change.optEditor', '#optimizationContainer #optRouteFocusFrom, #optimizationContainer #optRouteFocusTo', function () {
+    var from = String($('#optRouteFocusFrom').val() || '').trim();
+    var to = String($('#optRouteFocusTo').val() || '').trim();
+    setRouteFocus(from, to, { scroll: !!(from || to) });
+  });
+
+  $doc.on('click.optEditor', '#optimizationContainer #optRouteFocusReset', function (e) {
+    e.preventDefault();
+    clearRouteFocus();
   });
 
   $doc.on('keydown.optEditor', '#optimizationContainer #optRemoteStationsInput', function (e) {
@@ -1232,12 +2532,13 @@ function bindOptimizationEditorEvents() {
     refreshBerthTableSection();
   });
 
-  $doc.on('change input.optEditor', '#optimizationContainer #optBerthTableWrap .opt-edit-quota, #optimizationContainer #optBerthTableWrap .opt-edit-from, #optimizationContainer #optBerthTableWrap .opt-edit-to, #optimizationContainer #optBerthTableWrap .opt-edit-berths', function () {
-    if (OPT_STATE.reoptimizing) {
+  $doc.on('change.optEditor input.optEditor', '#optimizationContainer #optBerthTableWrap .opt-edit-quota, #optimizationContainer #optBerthTableWrap .opt-edit-from, #optimizationContainer #optBerthTableWrap .opt-edit-to, #optimizationContainer #optBerthTableWrap .opt-edit-berths', function () {
+    if (OPT_STATE.reoptimizing || OPT_STATE.syncingAllocations) {
       return;
     }
     clearOptInlineErrors();
-    syncAndRefreshChanges();
+    var rowId = parseInt($(this).closest('.opt-alloc-card').attr('data-row-id'), 10);
+    syncAndRefreshChanges(isNaN(rowId) ? null : rowId);
   });
 
   $doc.on('change.optEditor', '#optimizationContainer #optFromDate, #optimizationContainer #optToDate', function () {
@@ -1355,6 +2656,8 @@ function refreshBerthTableSection() {
   setOptimizationEditMode(OPT_STATE.reoptimizing);
   focusNewAllocationCard();
   updateChangeSummaryPanel();
+  applyQuotaFocusMode({ scroll: false });
+  flagLiveAllocationValidationErrors();
   if ($('#optCompareClassPills').length) {
     renderOptBerthCompare();
   }
@@ -1373,7 +2676,30 @@ function optFmtNum(v) {
 function optFmtPct(v) {
   return (Math.round(optNum(v) * 100) / 100).toFixed(2) + '%';
 }
-
+function bindOptimizedProfilePdfButton() {
+    $('#optimizationContainer #optDownloadOptimizedProfilePdfBtn')
+      .off('click.optPdf')
+      .on('click.optPdf', function (e) {
+        e.preventDefault();
+        downloadOptimizedProfilePdf();
+      });
+    $('#optimizationContainer #optSaveProfileBtn')
+      .off('click.optSave')
+      .on('click.optSave', function (e) {
+        e.preventDefault();
+        if (!$(this).prop('disabled')) {
+          saveOptimizationProfile(false);
+        }
+      });
+    $('#optimizationContainer #optSaveAsNewProfileBtn')
+      .off('click.optSaveNew')
+      .on('click.optSaveNew', function (e) {
+        e.preventDefault();
+        if (!$(this).prop('disabled')) {
+          saveOptimizationProfile(true);
+        }
+      });
+  }
 function optFmtCurrency(v) {
   return '\u20B9' + optFmtNum(v);
 }
@@ -1395,6 +2721,13 @@ function getDefaultOptUtilDateRange() {
 
 function initializeDefaultDatesForOptAndUtil(force) {
   var range = getDefaultOptUtilDateRange();
+  // Same 120-day future cap as demand (demandFrom/demandTo).
+  var maxDate = formatDateForInit(addDays(new Date(), 120));
+  ['#fromDate', '#toDate', '#optFromDate', '#optToDate'].forEach(function (sel) {
+    if ($(sel).length) {
+      $(sel).attr('max', maxDate);
+    }
+  });
   if (force || !OPT_DATES_TOUCHED.util) {
     if (force || !$('#fromDate').val()) {
       $('#fromDate').val(range.from);
@@ -1424,8 +2757,19 @@ window.resetOptUtilDateTouchFlags = resetOptUtilDateTouchFlags;
 // Build static shell once: date filters + empty content area (like utilization container).
 function buildOptimizationTabShell() {
   var range = getDefaultOptUtilDateRange();
+  var mode = OPT_PROFILE.profileMode === 'EDIT' ? 'EDIT' : 'CREATE';
   $('#optimizationContainer').html(
-    '<div class="row" style="margin-bottom:12px;">'
+    '<div class="opt-profile-mode">'
+    + '<div class="opt-profile-mode-legend">Profile Mode</div>'
+    + '<div class="opt-profile-mode-row">'
+    + '<label class="opt-profile-radio"><input type="radio" name="optProfileMode" value="CREATE"' + (mode === 'CREATE' ? ' checked' : '') + '> Create New Profile</label>'
+    + '<label class="opt-profile-radio"><input type="radio" name="optProfileMode" value="EDIT"' + (mode === 'EDIT' ? ' checked' : '') + '> Edit Existing Profile</label>'
+    + '<div id="optProfileSelectWrap" class="opt-profile-select-wrap' + (mode === 'EDIT' ? ' is-visible' : '') + '">'
+    + '<label for="optSavedProfileSelect">Select Profile</label>'
+    + '<select id="optSavedProfileSelect" class="form-control" style="border-radius:8px;height:34px;">'
+    + '<option value="">Select Profile</option>'
+    + '</select></div></div></div>'
+    + '<div class="row" style="margin-bottom:12px;">'
     + '<div class="col-md-2"><label class="utilization-filter-label">FROM DATE</label>'
     + '<input type="date" id="optFromDate" class="form-control" style="border-radius:8px;" value="' + range.from + '"></div>'
     + '<div class="col-md-2"><label class="utilization-filter-label">TO DATE</label>'
@@ -1435,6 +2779,9 @@ function buildOptimizationTabShell() {
     + '</div><div id="optimizationContent"></div>'
   );
   initializeDefaultDatesForOptAndUtil(false);
+  if (mode === 'EDIT') {
+    refreshOptimizationProfileList();
+  }
 }
 
 // Entry point after API success — same data split as fontend_raw_modular/js/app.js optimizeProfile().
@@ -1468,8 +2815,7 @@ function drawOptimizationProfile(responseData) {
   OPT_STATE.currentUtil = currentUtil;
   OPT_STATE.optimizedUtil = optimizedUtil;
   OPT_STATE.originalRemotes = ensureUniqueCodes(optimizer.remotes || []);
-  OPT_STATE.remoteAdded = [];
-  OPT_STATE.remoteRemoved = [];
+  restoreRemoteStateFromPersisted();
   OPT_STATE.originalBerths = Object.assign({}, optimizer.berths || {});
   OPT_STATE.deletedKeys = [];
   OPT_STATE.editedRows = berthsObjToRows(optimizer.berths).map(function (r) {
@@ -1641,11 +2987,24 @@ function renderOptimizationDashboard(optimizer, currentUtil, optimizedUtil) {
     + '<div class="opt-footer-compact">'
     + '<div id="optChangeSummaryPanel" class="opt-change-summary-panel"></div>'
     + '<div class="opt-action-bar">'
+    + '<button type="button" id="optSaveProfileBtn" class="btn btn-primary" style="margin-right:10px;" title="Save the last optimization request as a train profile">'
+    + '<i class="fa fa-save"></i> Save Profile'
+    + '</button>'
+    + '<button type="button" id="optSaveAsNewProfileBtn" class="btn btn-primary" style="margin-right:10px;'
+    + (OPT_PROFILE.profileMode === 'EDIT' ? '' : 'display:none;')
+    + '" title="Save as the next profile id">'
+    + '<i class="fa fa-copy"></i> Save as New Profile'
+    + '</button>'
+    + '<button type="button" id="optDownloadOptimizedProfilePdfBtn" class="btn btn-primary" style="margin-right:10px;" title="Download optimized train profile PDF">'
+    + '<i class="fa fa-download"></i> Download Optimized Train Profile'
+    + '</button>'
     + '<button type="button" id="optReoptimizeBtn" class="btn btn-primary" disabled>Re-Optimize</button>'
     + '</div></div>';
 
   $('#optimizationContent').html(html);
+  bindOptimizedProfilePdfButton();
   refreshRemotesUi();
+  applyQuotaFocusMode({ scroll: false });
   if (hasComparison) {
     renderOptBerthCompare();
     renderOptimizationCharts(curMetrics, optMetrics);
@@ -1688,10 +3047,12 @@ function ensureUniqueCodes(list) {
   });
 }
 
-function initRemoteEditState(remotes) {
+function initRemoteEditState(remotes, preserveSession) {
   OPT_STATE.originalRemotes = ensureUniqueCodes(remotes);
-  OPT_STATE.remoteAdded = [];
-  OPT_STATE.remoteRemoved = [];
+  if (!preserveSession) {
+    OPT_STATE.remoteAdded = [];
+    OPT_STATE.remoteRemoved = [];
+  }
 }
 
 function getVisibleRemoteCodes() {
@@ -1717,8 +3078,8 @@ function getVisibleRemoteCodes() {
 }
 
 function buildRemotesSection(remotes) {
-  initRemoteEditState(remotes || []);
-  var stationOptions = getOptStationOptions();
+  initRemoteEditState(remotes || [], true);
+  var stationOptions = getRemoteStationOptions();
   return '<div class="opt-remotes-section">'
     + '<div class="opt-remotes-head">'
     + '<span class="opt-remotes-label">Remotes</span>'
@@ -1790,6 +3151,11 @@ function computeRemoteDelta() {
 function markRemoteAsAdded(code) {
   code = normalizeRemoteCode(code);
   if (!code || OPT_STATE.reoptimizing) {
+    return;
+  }
+  var last = getTrainDestinationStation();
+  if (last && code === last) {
+    alert('The train\'s last station (' + last + ') cannot be configured as a remote.');
     return;
   }
   OPT_STATE.remoteRemoved = (OPT_STATE.remoteRemoved || []).filter(function (s) { return s !== code; });
@@ -2074,7 +3440,7 @@ function buildBerthDiffRowsHtml(rows, route, changesOnly) {
         ? row.cur + ' \u2192 0'
         : row.cur + ' \u2192 ' + row.prop);
     return '<div class="opt-diff-row opt-diff-' + row.status + '" data-status="' + row.status + '">'
-      + '<div class="opt-diff-quota" style="color:' + color + ';">' + optEsc(row.quota) + '</div>'
+      + '<div class="opt-diff-quota" style="color:' + color + ';"' + quotaTitleAttr(row.quota) + '>' + optEsc(row.quota) + '</div>'
       + '<div class="opt-diff-route">' + optEsc(row.from) + '\u2192' + optEsc(row.to) + '</div>'
       + '<div class="opt-diff-track">'
       + (curVisible
@@ -2122,13 +3488,264 @@ function buildTopQuotaImpactHtml(rows) {
   items.sort(function (a, b) {
     return Math.abs(b.delta) - Math.abs(a.delta);
   });
-  var top = items.slice(0, 2).map(function (x) {
+  var top = items.slice(0, OPT_TOP_IMPACT_LIMIT).map(function (x) {
     var cls = x.delta > 0 ? 'opt-diff-chip-up' : 'opt-diff-chip-down';
     var sign = x.delta > 0 ? '+' : '';
-    return '<span class="opt-diff-summary-chip ' + cls + '">' + optEsc(x.quota) + ' ' + sign + x.delta + '</span>';
+    return '<span class="opt-diff-summary-chip ' + cls + '"' + quotaTitleAttr(x.quota) + '>' + optEsc(x.quota) + ' ' + sign + x.delta + '</span>';
   }).join('');
   return '<div class="opt-berth-diff-impact"><span class="opt-impact-label">Top impact</span>' + top + '</div>';
 }
+function optNormalizeProfileBerthRow(r) {
+    return {
+      cls: String(r.CLS || r.CLASS || '').trim(),
+      quota: String(r.QUOTA_TYPE || r.QUOTA || '').trim(),
+      from: String(r.SOURCE || r.FROM || '').trim(),
+      to: String(r.DESTINATION || r.TO || '').trim(),
+      berths: optNum(r.BERTH || r.ALLOCATED_BERTHS || r.BERTHS)
+    };
+  }
+function getOptimizationMatrixStations(rows) {
+var seen = {};
+var routeStations = getRouteStationOrder() || {};
+var stations = Object.keys(routeStations)
+  .sort(function(a, b) {
+      return routeStations[a] - routeStations[b];
+  })
+  .filter(function(station) {
+      if (!station || seen[station]) {
+          return false;
+      }
+      seen[station] = true;
+      return true;
+  });
+(rows || []).forEach(function(r) {
+  [r.from, r.to].forEach(function(station) {
+      if (station && !seen[station]) {
+          seen[station] = true;
+          stations.push(station);
+      }
+  });
+});
+return stations;
+}
+  function groupProposedAllocationMatricesByClass() {
+    var byClass = {};
+    getProposedBerthsForCompare().map(optNormalizeProfileBerthRow).forEach(function (r) {
+      if (!r.cls || !r.from || !r.to || r.berths <= 0) {
+        return;
+      }
+      if (!byClass[r.cls]) {
+        byClass[r.cls] = { cells: {}, rows: [] };
+      }
+      var key = r.from + '-' + r.to;
+      if (!byClass[r.cls].cells[key]) {
+        byClass[r.cls].cells[key] = [];
+      }
+      byClass[r.cls].cells[key].push((r.quota || '-') + '[' + r.berths + ']');
+      byClass[r.cls].rows.push(r);
+    });
+    return byClass;
+  }
+//
+//  function buildProposedAllocationStationMatrixRows(matrix) {
+//    var stations = getOptimizationMatrixStations(matrix.rows);
+//    return stations.map(function (fromStation) {
+//      return [fromStation].concat(stations.map(function (toStation) {
+//        var values = matrix.cells[fromStation + '-' + toStation];
+//        return values && values.length ? values.join(', ') : '-';
+//      }));
+//    });
+//  }
+//  function buildProposedAllocationStationMatrixRows(matrix) {
+//
+//      var seen = {};
+//      var stations = [];
+//
+//      // Collect only stations involved in allocation changes
+//      matrix.rows.forEach(function (r) {
+//          if (r.berths > 0) {
+//
+//              if (!seen[r.from]) {
+//                  seen[r.from] = true;
+//                  stations.push(r.from);
+//              }
+//
+//              if (!seen[r.to]) {
+//                  seen[r.to] = true;
+//                  stations.push(r.to);
+//              }
+//          }
+//      });
+//
+//      // Preserve route order
+//      var routeOrder = getRouteStationOrder() || {};
+//
+//      stations.sort(function(a, b) {
+//          return (routeOrder[a] || 9999) - (routeOrder[b] || 9999);
+//      });
+//
+//      return stations.map(function (fromStation) {
+//          return [fromStation].concat(
+//              stations.map(function (toStation) {
+//                  var values = matrix.cells[fromStation + '-' + toStation];
+//                  return values && values.length ? values.join(', ') : '-';
+//              })
+//          );
+//      });
+//  }
+  function buildProposedAllocationStationMatrixRows(matrix) {
+      var stations = getOptimizationMatrixStations(matrix.rows);
+      // Keep only stations having at least one allocation
+      stations = stations.filter(function(stn) {
+          return matrix.rows.some(function(r) {
+              return r.from === stn || r.to === stn;
+          });
+      });
+      return stations.map(function(fromStation) {
+          return [fromStation].concat(stations.map(function(toStation) {
+              var values = matrix.cells[fromStation + '-' + toStation];
+              return values && values.length ? values.join(', ') : '-';
+          }));
+      });
+  }
+  function getOptimizedProfileDetailsForPdf() {
+    var selectedRemotes = getVisibleRemoteCodes().join(', ') || '-';
+    var trainNo = (SELECTED_TRAIN && (SELECTED_TRAIN.TRAIN_NO || SELECTED_TRAIN.TRAIN_NUMBER || SELECTED_TRAIN.train_number)) || '-';
+    var fromDate = $('#optFromDate').val() || '-';
+    var toDate = $('#optToDate').val() || '-';
+    var profileDate = (SELECTED_TRAIN && SELECTED_TRAIN.PROFILE_DATE) || '-';
+    return {
+      selectedRemotes: selectedRemotes,
+      trainNo: trainNo,
+      proposedDate: fromDate + (toDate && toDate !== fromDate ? ' to ' + toDate : ''),
+      profileDate: profileDate
+    };
+  }
+  function addOptimizedPdfHeader(doc, details) {
+      doc.setFillColor(27, 79, 216);
+      doc.rect(0, 0, 297, 25, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(18);
+      doc.setFont(undefined, 'bold');
+      doc.text('Train Quota Profile Optimization Utility', 14, 16);
+      doc.setTextColor(38, 56, 92);
+      doc.setFontSize(10);
+      doc.setFont(undefined, 'normal');
+      var y = 35;
+      var gap = 8;
+      doc.setFont(undefined, 'bold');
+      doc.text('Train Number', 14, y);
+      doc.setFont(undefined, 'normal');
+      doc.text(': ' + details.trainNo, 55, y);
+      y += gap;
+      doc.setFont(undefined, 'bold');
+      doc.text('Proposed Date', 14, y);
+      doc.setFont(undefined, 'normal');
+      doc.text(': ' + details.proposedDate, 55, y);
+      y += gap;
+      doc.setFont(undefined, 'bold');
+      doc.text('Profile Date', 14, y);
+      doc.setFont(undefined, 'normal');
+      doc.text(': ' + details.profileDate, 55, y);
+      y += gap;
+      doc.setFont(undefined, 'bold');
+      doc.text('Selected Remotes', 14, y);
+      doc.setFont(undefined, 'normal');
+      doc.text(': ' + details.selectedRemotes, 55, y);
+  }
+  function downloadOptimizedProfilePdf() {
+    try {
+    var jsPdfCtor = window.jspdf && window.jspdf.jsPDF;
+    if (!jsPdfCtor) {
+      alert('PDF download library is not available. Please refresh the page and try again.');
+      return;
+    }
+    var matricesByClass = groupProposedAllocationMatricesByClass();
+    var classes = Object.keys(matricesByClass).sort();
+    if (!classes.length) {
+      alert('No proposed allocation matrix data available to download.');
+      return;
+    }
+    var doc = new jsPdfCtor({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    if (typeof doc.autoTable !== 'function') {
+      alert('PDF table library is not available. Please refresh the page and try again.');
+      return;
+    }
+    var details = getOptimizedProfileDetailsForPdf();
+    addOptimizedPdfHeader(doc, details);
+    var y = 72;
+    classes.forEach(function (cls, idx) {
+      var matrix = matricesByClass[cls];
+      var stations = getOptimizationMatrixStations(matrix.rows).filter(function(stn) {
+          return matrix.rows.some(function(r) {
+              return r.from === stn || r.to === stn;
+          });
+      });
+//      var seen = {};
+//      var stations = [];
+//
+//      matrix.rows.forEach(function(r) {
+//          if (r.berths > 0) {
+//
+//              if (!seen[r.from]) {
+//                  seen[r.from] = true;
+//                  stations.push(r.from);
+//              }
+//
+//              if (!seen[r.to]) {
+//                  seen[r.to] = true;
+//                  stations.push(r.to);
+//              }
+//          }
+//      });
+//      var routeOrder = getRouteStationOrder() || {};
+//
+//      stations.sort(function(a, b) {
+//          return (routeOrder[a] || 9999) - (routeOrder[b] || 9999);
+//      });
+     // var stations = getOptimizationMatrixStations(matrix.rows);
+//      if (idx > 0 && y > 145) {
+//        doc.addPage();
+//        addOptimizedPdfHeader(doc, details);
+//        y = 55;
+//      }
+      if (idx > 0 && y > 145) {
+          doc.addPage();
+          doc.setFillColor(27, 79, 216);
+          doc.rect(0, 0, 297, 25, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFontSize(18);
+          doc.setFont(undefined, 'bold');
+          doc.text('Train Quota Profile Optimization Utility', 14, 16);
+          y = 30;
+      }
+      doc.setTextColor(27, 79, 216);
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Class ' + cls + ' - Proposed allocation matrix', 14, y);
+      doc.autoTable({
+        startY: y + 4,
+        head: [['Station'].concat(stations)],
+        body: buildProposedAllocationStationMatrixRows(matrix),
+        theme: 'grid',
+        pageBreak: 'auto',
+        styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak', halign: 'center', valign: 'middle' },
+        headStyles: { fillColor: [27, 79, 216], textColor: [255, 255, 255], fontStyle: 'bold' },
+        bodyStyles: { fillColor: [239, 246, 255], textColor: [31, 47, 77], fontStyle: 'bold' },
+        alternateRowStyles: { fillColor: [232, 246, 238] },
+        margin: { left: 14, right: 14 }
+      });
+      y = doc.lastAutoTable.finalY + 14;
+    });
+    var fileName = 'optimized-train-profile-' + String(details.trainNo).replace(/[^a-z0-9_-]+/gi, '-')
+      + '-' + String(details.profileDate).replace(/[^a-z0-9_-]+/gi, '-') + '.pdf';
+    doc.save(fileName);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to generate optimized profile PDF. Please try again.');
+    }
+  }
+  window.downloadOptimizedProfilePdf = downloadOptimizedProfilePdf;
 
 function buildOptBerthCompareSection() {
   var classes = getOptCompareClasses();
@@ -2148,7 +3765,9 @@ function buildOptBerthCompareSection() {
     + '</div>'
     + '<div id="optBerthDiffSummary"></div>'
     + '<div class="opt-berth-diff-toolbar">'
+    +  '<div class="opt-berth-diff-actions">'
     + '<label class="opt-berth-diff-toggle"><input type="checkbox" id="optBerthDiffChangesOnly"' + (changesOnly ? ' checked' : '') + '> Changes only</label>'
+    + '</div>'
     + '<div class="opt-berth-diff-legend">'
     + '<span><i class="opt-diff-legend-swatch opt-diff-legend-cur"></i> Current</span>'
     + '<span><i class="opt-diff-legend-swatch opt-diff-legend-prop"></i> Proposed</span>'
@@ -2159,14 +3778,15 @@ function buildOptBerthCompareSection() {
     + '<i class="fa fa-line-chart"></i> Utilization metrics <i class="fa fa-chevron-down opt-metrics-chevron"></i>'
     + '</button>'
     + '<button type="button" id="optQuotaChartToggleBtn" class="btn btn-default btn-sm opt-metrics-toggle">'
-    + '<i class="fa fa-bar-chart"></i> Fill rate by quota <i class="fa fa-chevron-down opt-metrics-chevron"></i>'
+    + '<i class="fa fa-bar-chart"></i> KM utilization % by quota <i class="fa fa-chevron-down opt-metrics-chevron"></i>'
     + '</button>'
+
     + '</div>'
     + '<div id="optUtilMetricsPanel" class="opt-util-metrics-panel" style="display:none;">'
     + '<div id="optUtilMetricsCollapse"></div>'
     + '</div>'
     + '<div id="optQuotaChartPanel" class="opt-chart-compact" style="display:none;">'
-    + '<div class="utilization-chart-title">Fill rate by quota \u2014 current vs proposed</div>'
+    + '<div class="utilization-chart-title">KM utilization % by quota \u2014 current vs proposed</div>'
     + '<div class="opt-chart-compact-canvas"><canvas id="optQuotaCompareChart"></canvas></div>'
     + '</div>'
     + '</div>';
@@ -2207,7 +3827,7 @@ function renderOptBerthCompare() {
 }
 
 // Compact allocation tile — quota color matches profile/utilization (getQuotaDisplayColor).
-function buildAllocCard(r, cls, stations, quotas, disabled) {
+function buildAllocCard(r, cls, stations, quotas, disabled, allRows) {
   var rowId = r._rowId != null ? r._rowId : OPT_STATE.nextRowId++;
   r._rowId = rowId;
   var isNew = !!r.isNew;
@@ -2223,16 +3843,18 @@ function buildAllocCard(r, cls, stations, quotas, disabled) {
       ? '<span class="opt-alloc-badge" data-change-type="' + (isNew ? 'new' : 'modified') + '">' + optEsc(changeLabel || (isNew ? 'New' : 'Modified')) + '</span>'
       : '<span class="opt-alloc-badge" style="display:none;"></span>');
   var quotaLabel = r.QUOTA ? optEsc(r.QUOTA) : 'Quota';
+  var quotaPillTitle = r.QUOTA ? quotaTitleAttr(r.QUOTA) : '';
   var diffHtml = modified && r.origSnapshot
     ? '<span class="opt-alloc-diff">Was: <strong>' + optNum(r.origSnapshot.BERTHS) + '</strong></span>'
     : '';
-  return '<div class="opt-alloc-card' + stateCls + '" data-row-id="' + rowId + '" data-class="' + optEsc(cls) + '" data-is-new="' + (isNew ? '1' : '0') + '" data-removed="' + (removed ? '1' : '0') + '" data-quota="' + optEsc(r.QUOTA || '') + '" style="--opt-quota-color:' + (removed ? '#94a3b8' : qColor) + ';">'
+  var availableQuotas = removed ? quotas : getAvailableQuotasForRow(r, quotas, allRows || OPT_STATE.editedRows);
+  return '<div class="opt-alloc-card' + stateCls + '" data-row-id="' + rowId + '" data-class="' + optEsc(cls) + '" data-is-new="' + (isNew ? '1' : '0') + '" data-removed="' + (removed ? '1' : '0') + '" data-quota="' + optEsc(r.QUOTA || '') + '" data-from="' + optEsc(r.FROM || '') + '" data-to="' + optEsc(r.TO || '') + '" style="--opt-quota-color:' + (removed ? '#94a3b8' : qColor) + ';">'
     + '<div class="opt-alloc-accent"></div>'
     + badge
     + '<div class="opt-alloc-row opt-alloc-row-top">'
     + '<div class="opt-alloc-quota-group">'
-    + '<span class="opt-quota-pill">' + quotaLabel + '</span>'
-    + '<select class="opt-edit-select opt-edit-quota opt-edit-quota-select"' + cardDisabled + '>' + optSelectOptions(quotas, r.QUOTA, 'Quota') + '</select>'
+    + '<span class="opt-quota-pill"' + quotaPillTitle + '>' + quotaLabel + '</span>'
+    + '<select class="opt-edit-select opt-edit-quota opt-edit-quota-select"' + cardDisabled + quotaPillTitle + '>' + optQuotaSelectOptions(availableQuotas, r.QUOTA, 'Quota') + '</select>'
     + '</div>'
     + '<div class="opt-alloc-berths-compact">'
     + '<span class="opt-alloc-berths-label">Quota-berths</span>'
@@ -2253,6 +3875,274 @@ function buildAllocCard(r, cls, stations, quotas, disabled) {
     + '</div>';
 }
 
+function getFocusedQuotas() {
+  return Array.isArray(OPT_STATE.focusedQuotas) ? OPT_STATE.focusedQuotas : [];
+}
+
+function getRouteFocus() {
+  var rf = OPT_STATE.routeFocus || {};
+  return {
+    from: String(rf.from || '').trim(),
+    to: String(rf.to || '').trim()
+  };
+}
+
+function hasRouteFocus() {
+  var rf = getRouteFocus();
+  return !!(rf.from || rf.to);
+}
+
+/** Match allocation From/To against route highlight (both, From-only, or To-only). Exact match only. */
+function allocationMatchesRouteFocus(allocFrom, allocTo, routeFocus) {
+  routeFocus = routeFocus || getRouteFocus();
+  var rfFrom = String((routeFocus && routeFocus.from) || '').trim();
+  var rfTo = String((routeFocus && routeFocus.to) || '').trim();
+  if (!rfFrom && !rfTo) {
+    return true;
+  }
+  allocFrom = String(allocFrom || '').trim();
+  allocTo = String(allocTo || '').trim();
+  if (rfFrom && rfTo) {
+    return allocFrom === rfFrom && allocTo === rfTo;
+  }
+  if (rfFrom) {
+    return allocFrom === rfFrom;
+  }
+  return allocTo === rfTo;
+}
+
+function hasAllocationFocus() {
+  return getFocusedQuotas().length > 0 || hasRouteFocus();
+}
+
+function cardMatchesAllocationFocus($card, focusedQuotas, routeFocus) {
+  var quotaOk = !focusedQuotas.length || focusedQuotas.indexOf(String($card.attr('data-quota') || '')) !== -1;
+  var routeOk = allocationMatchesRouteFocus($card.attr('data-from'), $card.attr('data-to'), routeFocus);
+  return quotaOk && routeOk;
+}
+
+function buildQuotaFocusSummaryText(focused, matchCount) {
+  focused = focused || [];
+  matchCount = optNum(matchCount);
+  if (!focused.length) {
+    return '';
+  }
+  if (focused.length === 1) {
+    return 'Showing ' + matchCount + ' ' + focused[0] + ' allocation' + (matchCount === 1 ? '' : 's');
+  }
+  return 'Showing ' + matchCount + ' allocations across ' + focused.length + ' quotas';
+}
+
+function buildRouteFocusSummaryText(routeFocus, matchCount) {
+  if (!routeFocus || (!routeFocus.from && !routeFocus.to)) {
+    return '';
+  }
+  var label;
+  if (routeFocus.from && routeFocus.to) {
+    label = routeFocus.from + ' \u2192 ' + routeFocus.to;
+  } else if (routeFocus.from) {
+    label = routeFocus.from + ' \u2192 \u2026';
+  } else {
+    label = '\u2026 \u2192 ' + routeFocus.to;
+  }
+  return 'Showing ' + optNum(matchCount) + ' ' + label
+    + ' allocation' + (optNum(matchCount) === 1 ? '' : 's');
+}
+
+function buildCombinedFocusSummaryText(focused, routeFocus, matchCount) {
+  var parts = [];
+  var quotaText = buildQuotaFocusSummaryText(focused, matchCount);
+  var routeText = buildRouteFocusSummaryText(routeFocus, matchCount);
+  if (focused.length && (routeFocus.from || routeFocus.to)) {
+    var routeLabel = routeFocus.from && routeFocus.to
+      ? (routeFocus.from + ' \u2192 ' + routeFocus.to)
+      : (routeFocus.from ? (routeFocus.from + ' \u2192 \u2026') : ('\u2026 \u2192 ' + routeFocus.to));
+    return 'Showing ' + optNum(matchCount) + ' allocation' + (optNum(matchCount) === 1 ? '' : 's')
+      + ' · ' + focused.join(', ') + ' · ' + routeLabel;
+  }
+  if (quotaText) {
+    parts.push(quotaText);
+  }
+  if (routeText) {
+    parts.push(routeText);
+  }
+  return parts.join(' · ');
+}
+
+function countQuotaFocusMatches(rows, focused) {
+  focused = focused || [];
+  if (!focused.length) {
+    return 0;
+  }
+  var count = 0;
+  (rows || []).forEach(function (r) {
+    if (focused.indexOf(String(r.QUOTA || '')) !== -1) {
+      count += 1;
+    }
+  });
+  return count;
+}
+
+function expandPanelsForQuotaFocus($wrap, classMap) {
+  Object.keys(classMap || {}).forEach(function (cls) {
+    OPT_STATE.expandedClasses = OPT_STATE.expandedClasses || {};
+    OPT_STATE.expandedClasses[cls] = true;
+    var $panel = $wrap.find('.opt-berth-cls-panel').filter(function () {
+      return $(this).attr('data-class') === cls;
+    });
+    if (!$panel.length) {
+      return;
+    }
+    $panel.find('.opt-berth-cls-body').show();
+    $panel.find('.opt-berth-chevron').addClass('open');
+  });
+}
+
+/**
+ * Combined Quota + Route Focus Mode.
+ * Dim non-matching cards; highlight matches. Both filters AND together when both active.
+ */
+function applyQuotaFocusMode(opts) {
+  opts = opts || {};
+  var $wrap = $('#optBerthTableWrap');
+  if (!$wrap.length) {
+    return;
+  }
+
+  var focused = getFocusedQuotas();
+  var routeFocus = getRouteFocus();
+  var active = focused.length > 0 || hasRouteFocus();
+  var $legend = $wrap.find('.opt-quota-legend');
+  var $summary = $wrap.find('#optQuotaFocusSummary');
+  var $reset = $wrap.find('#optQuotaFocusReset');
+  var $routeReset = $wrap.find('#optRouteFocusReset');
+  var $routeSummary = $wrap.find('#optRouteFocusSummary');
+  var $routeFrom = $wrap.find('#optRouteFocusFrom');
+  var $routeTo = $wrap.find('#optRouteFocusTo');
+
+  $legend.find('.opt-quota-legend-item').each(function () {
+    var q = String($(this).attr('data-quota') || '');
+    $(this).toggleClass('is-selected', focused.indexOf(q) !== -1)
+      .attr('aria-pressed', focused.indexOf(q) !== -1 ? 'true' : 'false');
+  });
+
+  if ($routeFrom.length) {
+    $routeFrom.val(routeFocus.from || '');
+  }
+  if ($routeTo.length) {
+    $routeTo.val(routeFocus.to || '');
+  }
+
+  if (!active) {
+    $wrap.removeClass('opt-quota-focus-active');
+    $legend.removeClass('is-focusing');
+    $wrap.find('.opt-alloc-card').removeClass('opt-quota-match opt-quota-dim');
+    $summary.hide().text('');
+    $reset.hide();
+    $routeSummary.hide().text('');
+    $routeReset.hide();
+    $wrap.find('.opt-route-focus').removeClass('is-active');
+    return;
+  }
+
+  $wrap.addClass('opt-quota-focus-active');
+  $legend.toggleClass('is-focusing', focused.length > 0);
+  $wrap.find('.opt-route-focus').toggleClass('is-active', hasRouteFocus());
+  $reset.toggle(focused.length > 0);
+  $routeReset.toggle(hasRouteFocus());
+
+  var matchCount = 0;
+  var $firstMatch = null;
+  var classesToExpand = {};
+
+  $wrap.find('.opt-alloc-card').each(function () {
+    var $card = $(this);
+    var match = cardMatchesAllocationFocus($card, focused, routeFocus);
+    $card.toggleClass('opt-quota-match', match);
+    $card.toggleClass('opt-quota-dim', !match);
+    if (match) {
+      matchCount += 1;
+      if (!$firstMatch) {
+        $firstMatch = $card;
+      }
+      var cls = String($card.attr('data-class') || '');
+      if (cls) {
+        classesToExpand[cls] = true;
+      }
+    }
+  });
+
+  expandPanelsForQuotaFocus($wrap, classesToExpand);
+  var summaryText = buildCombinedFocusSummaryText(focused, routeFocus, matchCount);
+  $summary.text(summaryText).toggle(!!summaryText);
+  $routeSummary.text(
+    hasRouteFocus()
+      ? buildRouteFocusSummaryText(routeFocus, matchCount)
+      : ''
+  ).toggle(hasRouteFocus());
+
+  if (opts.scroll && $firstMatch && $firstMatch.length) {
+    var top = $firstMatch.offset().top - 90;
+    $('html, body').stop(true).animate({ scrollTop: Math.max(0, top) }, 280);
+  }
+}
+
+function toggleQuotaFocus(quota) {
+  quota = String(quota || '').trim();
+  if (!quota) {
+    return;
+  }
+  var list = getFocusedQuotas().slice();
+  var idx = list.indexOf(quota);
+  var selecting = idx === -1;
+  if (selecting) {
+    list.push(quota);
+  } else {
+    list.splice(idx, 1);
+  }
+  OPT_STATE.focusedQuotas = list;
+  applyQuotaFocusMode({ scroll: selecting || hasRouteFocus() });
+}
+
+function clearQuotaFocus() {
+  OPT_STATE.focusedQuotas = [];
+  applyQuotaFocusMode({ scroll: false });
+}
+
+function setRouteFocus(from, to, opts) {
+  OPT_STATE.routeFocus = {
+    from: String(from || '').trim(),
+    to: String(to || '').trim()
+  };
+  applyQuotaFocusMode({ scroll: !!(opts && opts.scroll && hasRouteFocus()) });
+}
+
+function clearRouteFocus() {
+  OPT_STATE.routeFocus = { from: '', to: '' };
+  applyQuotaFocusMode({ scroll: false });
+}
+
+function buildOptRouteFocusFilter() {
+  var stations = getOptStationOptions();
+  var rf = getRouteFocus();
+  var active = hasRouteFocus();
+  return '<div class="opt-route-focus' + (active ? ' is-active' : '') + '">'
+    + '<div class="opt-route-focus-label"><i class="fa fa-exchange"></i> Route highlight</div>'
+    + '<select id="optRouteFocusFrom" class="form-control opt-route-focus-select" title="From station">'
+    + optSelectOptions(stations, rf.from, 'From', true)
+    + '</select>'
+    + '<span class="opt-alloc-arrow">&#8594;</span>'
+    + '<select id="optRouteFocusTo" class="form-control opt-route-focus-select" title="To station">'
+    + optSelectOptions(stations, rf.to, 'To', true)
+    + '</select>'
+    + '<span id="optRouteFocusSummary" class="opt-quota-focus-summary"'
+    + (active ? '' : ' style="display:none;"') + '></span>'
+    + '<button type="button" id="optRouteFocusReset" class="opt-quota-focus-reset"'
+    + (active ? '' : ' style="display:none;"') + ' title="Clear route highlight">'
+    + '<i class="fa fa-times"></i> Clear Route</button>'
+    + '</div>';
+}
+
 function buildOptQuotaLegend(rows) {
   var seen = {};
   var items = [];
@@ -2265,13 +4155,53 @@ function buildOptQuotaLegend(rows) {
   });
   items.sort();
   if (!items.length) {
-    return '';
+    return buildOptRouteFocusFilter();
   }
-  return '<div class="opt-quota-legend">' + items.map(function (q) {
+
+  var focused = getFocusedQuotas().filter(function (q) {
+    return items.indexOf(q) !== -1;
+  });
+  OPT_STATE.focusedQuotas = focused;
+
+  var routeFocus = getRouteFocus();
+  var matchCount = 0;
+  (rows || []).forEach(function (r) {
+    var quotaOk = !focused.length || focused.indexOf(String(r.QUOTA || '')) !== -1;
+    var routeOk = allocationMatchesRouteFocus(r.FROM, r.TO, routeFocus);
+    if (quotaOk && routeOk && (focused.length || hasRouteFocus())) {
+      matchCount += 1;
+    }
+  });
+  var hasFocus = focused.length > 0;
+  var summaryText = buildCombinedFocusSummaryText(focused, routeFocus, matchCount);
+
+  var legendItems = items.map(function (q) {
     var color = optQuotaColor(q);
-    return '<span class="opt-quota-legend-item" style="--opt-quota-color:' + color + ';">'
-      + '<span class="opt-quota-legend-dot"></span>' + optEsc(q) + '</span>';
-  }).join('') + '</div>';
+    var selected = focused.indexOf(q) !== -1;
+    var fullName = (typeof getQuotaFullName === 'function') ? (getQuotaFullName(q) || q) : q;
+    var tip = fullName + ' — click to focus';
+    return '<button type="button" class="opt-quota-legend-item' + (selected ? ' is-selected' : '') + '"'
+      + ' data-quota="' + optEsc(q) + '"'
+      + ' style="--opt-quota-color:' + color + ';"'
+      + ' aria-pressed="' + (selected ? 'true' : 'false') + '"'
+      + ' title="' + optEsc(tip) + '">'
+      + '<span class="opt-quota-legend-dot"></span>'
+      + '<span class="opt-quota-legend-label">' + optEsc(q) + '</span>'
+      + '</button>';
+  }).join('');
+
+  return '<div class="opt-quota-legend' + (hasFocus ? ' is-focusing' : '') + '">'
+    + '<div class="opt-quota-legend-row">'
+    + '<div class="opt-quota-legend-items">' + legendItems + '</div>'
+    + '<div class="opt-quota-legend-actions">'
+    + '<span id="optQuotaFocusSummary" class="opt-quota-focus-summary"'
+    + (hasFocus || hasRouteFocus() ? '' : ' style="display:none;"') + '>' + optEsc(summaryText) + '</span>'
+    + '<button type="button" id="optQuotaFocusReset" class="opt-quota-focus-reset"'
+    + (hasFocus ? '' : ' style="display:none;"') + ' title="Clear quota focus">'
+    + '<i class="fa fa-eye"></i> Show All</button>'
+    + '</div></div>'
+    + buildOptRouteFocusFilter()
+    + '</div>';
 }
 
 function buildBerthTableSection(rows) {
@@ -2309,7 +4239,7 @@ function buildBerthTableSection(rows) {
     var removedCount = items.filter(function (r) { return r.removed; }).length;
     var changeCount = countClassChanges(items);
     var cards = items.map(function (r) {
-      return buildAllocCard(r, cls, stations, quotas, disabled);
+      return buildAllocCard(r, cls, stations, quotas, disabled, rows);
     }).join('');
     var isOpen = hasExpandedPref ? !!expanded[cls] : (idx === 0);
     var openCls = isOpen ? '' : ' style="display:none;"';
@@ -2352,15 +4282,15 @@ function buildBerthTableSection(rows) {
 
 // fontend_raw_modular renderProfileComparison() — 3-column grid: current | delta | proposed.
 function buildComparisonSection(cur, opt) {
-  // Fill rate = sum(SERVED_BERTH_KM) / sum(TOTAL_BERTH_KM) * 100 per utilization matrix.
+  // KM utilization = sum(SERVED_BERTH_KM) / sum(TOTAL_BERTH_KM) * 100 per utilization matrix.
   var curUtil = cur.tKm > 0 ? (cur.sKm / cur.tKm) * 100 : 0;
   var optUtil = opt.tKm > 0 ? (opt.sKm / opt.tKm) * 100 : 0;
 
   return '<div class="opt-compare-card opt-compare-card-inline"><div class="opt-cmp-grid">'
-    + optCmpCol('current', 'Current profile', [
+    + optCmpCol('current', 'Current profile (Average per day)', [
       ['Total berths', optFmtNum(cur.cap)],
       ['Utilized berths', optFmtNum(cur.served)],
-      ['Fill rate', curUtil.toFixed(2) + '%'],
+      ['KM utilization %', curUtil.toFixed(2) + '%'],
       ['Unserved demand', optFmtNum(cur.unserved)],
       ['Revenue earned', optFmtCurrency(cur.rev)]
     ])
@@ -2371,10 +4301,10 @@ function buildComparisonSection(cur, opt) {
       { val: opt.unserved - cur.unserved, invert: true },
       { val: Math.round(opt.rev - cur.rev) }
     ])
-    + optCmpCol('proposed', 'Proposed profile', [
+    + optCmpCol('proposed', 'Proposed profile (Average per day)', [
       ['Total berths', optFmtNum(opt.cap)],
       ['Utilized berths', optFmtNum(opt.served)],
-      ['Fill rate', optUtil.toFixed(2) + '%'],
+      ['KM utilization %', optUtil.toFixed(2) + '%'],
       ['Unserved demand', optFmtNum(opt.unserved)],
       ['Revenue earned', optFmtCurrency(opt.rev)]
     ])
@@ -2479,6 +4409,9 @@ function renderOptimizationCharts(cur, opt) {
         plugins: {
           tooltip: {
             callbacks: {
+              title: function (items) {
+                return items && items[0] ? getQuotaFullName(allQuotas[items[0].dataIndex]) : '';
+              },
               label: function (ctx) {
                 return ctx.dataset.label + ': ' + ctx.parsed.y + '%';
               }
@@ -2500,3 +4433,55 @@ function renderOptimizationCharts(cur, opt) {
 $(function () {
   bindOptimizationEditorEvents();
 });
+function getWebServiceDataTrain(requestData, requestUrl) {
+
+    return new Promise(function(resolve, reject) {
+
+        $.ajax({
+            beforeSend: function(request) {
+                App.blockUI({
+                    target: "#" + blockUi_Id,
+                    opacity: .5,
+                    animate: !0
+                });
+            },
+
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': getAuth()
+            },
+
+            type: 'POST',
+
+            url: requestUrl,
+
+            dataType: 'json',
+
+            data: JSON.stringify(requestData),
+
+            success: function(response) {
+
+                App.unblockUI("#" + blockUi_Id);
+                blockUi_Id = "reportBody";
+
+                // Same behaviour as safeJson()
+                resolve(response && response.data ? response.data : response);
+            },
+
+            error: function(xhr, status, error) {
+
+                console.error("API Error:", xhr);
+                console.error("HTTP Status:", xhr.status);
+                console.error("Status:", status);
+                console.error("Error:", error);
+                console.error("Response Text:", xhr.responseText);
+
+                App.unblockUI("#" + blockUi_Id);
+                blockUi_Id = "reportBody";
+                reject(new Error(error || status || 'Request failed'));
+            }
+        });
+
+    });
+}
