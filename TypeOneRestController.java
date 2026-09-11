@@ -2416,6 +2416,15 @@ public class TypeOneRestController {
 			        );
 			    }
 
+			    if (rps.getEdited_coaches() != null &&
+			            !rps.getEdited_coaches().isEmpty()) {
+
+			        body.put(
+			                "edited_coaches",
+			                rps.getEdited_coaches()
+			        );
+			    }
+
 			    if (rps.getRemote_added() != null &&
 			            !rps.getRemote_added().isEmpty()) {
 
@@ -2566,6 +2575,8 @@ public class TypeOneRestController {
 			    body.put("primes_id", userName);
 			    body.put("edited_berths",
 			            rps.getEdited_berths() != null ? rps.getEdited_berths() : new HashMap<String, Object>());
+			    body.put("edited_coaches",
+			            rps.getEdited_coaches() != null ? rps.getEdited_coaches() : new HashMap<String, Object>());
 			    body.put("remote_added",
 			            rps.getRemote_added() != null ? rps.getRemote_added() : new ArrayList<Object>());
 			    body.put("remote_removed",
