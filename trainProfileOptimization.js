@@ -466,6 +466,14 @@ function apiFetchTrainOptimization(
 	    }
 
 	    if (reoptDelta &&
+	        reoptDelta.edited_coaches &&
+	        Object.keys(reoptDelta.edited_coaches).length) {
+
+	        requestData.edited_coaches =
+	            reoptDelta.edited_coaches;
+	    }
+
+	    if (reoptDelta &&
 	        Array.isArray(reoptDelta.remote_added) &&
 	        reoptDelta.remote_added.length) {
 
@@ -501,9 +509,11 @@ function captureOptimizeRequestPayload(requestData) {
 function applySavedOptimizePayloadToState(payload, opts) {
   var body = toOptimizeRequestPayload(payload);
   OPT_STATE.persistedEditedBerths = Object.assign({}, body.edited_berths || {});
+  OPT_STATE.persistedEditedCoaches = Object.assign({}, body.edited_coaches || {});
   OPT_STATE.persistedRemoteAdded = ensureUniqueCodes(body.remote_added || []);
   OPT_STATE.persistedRemoteRemoved = ensureUniqueCodes(body.remote_removed || []);
   restoreRemoteStateFromPersisted();
+  restoreCoachesFromPersisted();
   // Skip when Show Optimization should keep the user's current UI dates.
   if (!(opts && opts.skipDates)) {
     applyOptDatesFromPayload(body);
@@ -582,6 +592,7 @@ function postSavedOptimizePayload(payload) {
   var requestData = {
     params: Array.isArray(src.params) ? src.params.slice() : [],
     edited_berths: src.edited_berths || {},
+    edited_coaches: src.edited_coaches || {},
     remote_added: src.remote_added || [],
     remote_removed: src.remote_removed || []
   };
@@ -755,6 +766,7 @@ function toOptimizeRequestPayload(loaded, trainNo) {
     return {
       params: src.params.slice(),
       edited_berths: src.edited_berths || {},
+      edited_coaches: src.edited_coaches || {},
       remote_added: src.remote_added || [],
       remote_removed: src.remote_removed || []
     };
@@ -769,6 +781,7 @@ function toOptimizeRequestPayload(loaded, trainNo) {
       src.end_date || src.toDate || $('#optToDate').val() || ''
     ],
     edited_berths: src.edited_berths || {},
+    edited_coaches: src.edited_coaches || {},
     remote_added: src.remote_added || [],
     remote_removed: src.remote_removed || []
   };
@@ -884,12 +897,15 @@ function loadSelectedOptimizationProfile(profileId) {
     applySavedOptimizePayloadToState(payload);
     return postSavedOptimizePayload(payload);
   }).then(function (response) {
+    var savedComparisonRows = savedPayloadRowsForComparison(OPT_PROFILE.profilePayload);
     persistReoptimizeDelta({
       edited_berths: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_berths) || {},
+      edited_coaches: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_coaches) || {},
       remote_added: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.remote_added) || [],
       remote_removed: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.remote_removed) || []
     });
     drawOptimizationProfile(response);
+    applySuccessfulReoptimizeComparison(savedComparisonRows);
   }).catch(function (error) {
     console.error(error);
     alert(error.message || 'Failed to load saved profile');
@@ -917,14 +933,24 @@ function saveOptimizationProfile(saveAsNew) {
   if (OPT_STATE.savingProfile) {
     return;
   }
+  if ($('#optBerthTableWrap').length) {
+    syncEditedRowsFromDom();
+  }
   if (getChangeCounts().total > 0) {
-    alert('Re-optimize your changes before saving the profile');
+    alert('Please re-optimize pending changes before saving the profile.');
+    updateReoptimizeButton();
     return;
   }
-
   var trainNo = getTrainNumber(SELECTED_TRAIN);
   var siteId = getSiteId(SELECTED_TRAIN);
   var payload = toOptimizeRequestPayload(OPT_PROFILE.lastRequestPayload, trainNo);
+  if (OPT_STATE.editedRows && OPT_STATE.editedRows.length) {
+    var delta = buildCumulativeReoptimizeDelta(OPT_STATE.editedRows);
+    payload.edited_berths = delta.edited_berths || payload.edited_berths || {};
+    payload.edited_coaches = delta.edited_coaches || payload.edited_coaches || {};
+    payload.remote_added = delta.remote_added || payload.remote_added || [];
+    payload.remote_removed = delta.remote_removed || payload.remote_removed || [];
+  }
   var isEdit = OPT_PROFILE.profileMode === 'EDIT';
   var updateCurrent = isEdit && !saveAsNew;
   if (updateCurrent && !OPT_PROFILE.selectedProfileId) {
@@ -959,6 +985,7 @@ function saveOptimizationProfile(saveAsNew) {
         ($('.username').text() || '').trim()
       ],
       edited_berths: payload.edited_berths || {},
+      edited_coaches: payload.edited_coaches || {},
       remote_added: payload.remote_added || [],
       remote_removed: payload.remote_removed || []
     };
@@ -1131,6 +1158,7 @@ function getUtilizationData(fromDate, toDate){
 
 function hasPersistedOptimizationConstraints() {
   return Object.keys(OPT_STATE.persistedEditedBerths || {}).length > 0
+    || Object.keys(OPT_STATE.persistedEditedCoaches || {}).length > 0
     || (OPT_STATE.persistedRemoteAdded || []).length > 0
     || (OPT_STATE.persistedRemoteRemoved || []).length > 0;
 }
@@ -1138,6 +1166,7 @@ function hasPersistedOptimizationConstraints() {
 function buildPersistedOnlyDelta() {
   return {
     edited_berths: Object.assign({}, OPT_STATE.persistedEditedBerths || {}),
+    edited_coaches: Object.assign({}, OPT_STATE.persistedEditedCoaches || {}),
     remote_added: ensureUniqueCodes(OPT_STATE.persistedRemoteAdded || []),
     remote_removed: ensureUniqueCodes(OPT_STATE.persistedRemoteRemoved || [])
   };
@@ -1258,8 +1287,13 @@ var OPT_STATE = {
   remoteRemoved: [],
   // Cumulative constraints sent across re-optimization passes (merged into each next request).
   persistedEditedBerths: {},
+  persistedEditedCoaches: {},
   persistedRemoteAdded: [],
   persistedRemoteRemoved: [],
+  originalCoaches: {},
+  originalPhyBerths: {},
+  editedCoaches: {},
+  coachesInitialized: false,
   // Quota Focus Mode — multi-select legend filters (persists across re-optimize redraws).
   focusedQuotas: [],
   // Route Highlight Filter — From/To pair focus (compatible with quota focus).
@@ -1285,10 +1319,12 @@ function logOptimizationRequest(action, reoptDelta, body) {
   }
   console.info('[TPO optimize] ' + action, {
     persistedEditedBerths: Object.assign({}, OPT_STATE.persistedEditedBerths || {}),
+    persistedEditedCoaches: Object.assign({}, OPT_STATE.persistedEditedCoaches || {}),
     persistedRemoteAdded: (OPT_STATE.persistedRemoteAdded || []).slice(),
     persistedRemoteRemoved: (OPT_STATE.persistedRemoteRemoved || []).slice(),
     requestDelta: reoptDelta ? {
       edited_berths: Object.assign({}, (reoptDelta.edited_berths) || {}),
+      edited_coaches: Object.assign({}, (reoptDelta.edited_coaches) || {}),
       remote_added: (reoptDelta.remote_added || []).slice(),
       remote_removed: (reoptDelta.remote_removed || []).slice()
     } : null,
@@ -1325,8 +1361,13 @@ function clearOptimizationWorkspace() {
   OPT_STATE.remoteAdded = [];
   OPT_STATE.remoteRemoved = [];
   OPT_STATE.persistedEditedBerths = {};
+  OPT_STATE.persistedEditedCoaches = {};
   OPT_STATE.persistedRemoteAdded = [];
   OPT_STATE.persistedRemoteRemoved = [];
+  OPT_STATE.originalCoaches = {};
+  OPT_STATE.originalPhyBerths = {};
+  OPT_STATE.editedCoaches = {};
+  OPT_STATE.coachesInitialized = false;
   OPT_STATE.focusedQuotas = [];
   OPT_STATE.routeFocus = { from: '', to: '' };
   $('#optimizationContent').html('');
@@ -1429,26 +1470,178 @@ function quotaTitleAttr(quota) {
   return full ? (' title="' + optEsc(full) + '"') : '';
 }
 
-// Allocation lifecycle: stable → modified → new → removed (removed always last).
+// Allocation lifecycle: keep route order; only removed rows move to the end.
+function getRemovedBerthCount(row) {
+  if (!row) {
+    return 0;
+  }
+  if (row.removedBerthsOrig != null) {
+    return optNum(row.removedBerthsOrig);
+  }
+  if (row.origSnapshot && row.origSnapshot.BERTHS != null) {
+    return optNum(row.origSnapshot.BERTHS);
+  }
+  if (row.origKey && OPT_STATE.originalBerths && OPT_STATE.originalBerths[row.origKey] != null) {
+    return optNum(OPT_STATE.originalBerths[row.origKey]);
+  }
+  return optNum(row.BERTHS);
+}
+
+function removedBerthLabel(row) {
+  var n = getRemovedBerthCount(row);
+  return 'Removed ' + n + ' berth' + (n === 1 ? '' : 's');
+}
+
 function sortClassRows(items) {
-  var removed = [];
-  var fresh = [];
-  var changed = [];
-  var stable = [];
-  (items || []).forEach(function (r) {
-    if (r.removed) {
-      removed.push(r);
-    } else if (r.isNew) {
-      fresh.push(r);
-    } else if (isRowModified(r)) {
-      changed.push(r);
-    } else {
-      stable.push(r);
+  return (items || []).slice().sort(compareAllocRows);
+}
+																  
+
+
+
+
+
+function reorderClassCardsInDom(cls) {
+  var $panel = $('#optBerthTableWrap .opt-berth-cls-panel').filter(function () {
+    return $(this).attr('data-class') === cls;
+  });
+  var $grid = $panel.find('.opt-alloc-grid');
+  if (!$grid.length) {
+    return;
+  }
+  var order = sortClassRows(OPT_STATE.editedRows.filter(function (r) {
+    return r.CLASS === cls;
+  })).map(function (r) { return r._rowId; });
+  order.forEach(function (id) {
+    var $card = $grid.find('.opt-alloc-card[data-row-id="' + id + '"]');
+    if ($card.length) {
+      $grid.append($card);
     }
   });
-  changed.sort(compareAllocRows);
-  stable.sort(compareAllocRows);
-  return stable.concat(changed).concat(fresh).concat(removed);
+}
+
+function refreshBerthSummaryPills() {
+  var $wrap = $('#optBerthTableWrap .opt-berth-summary');
+  if (!$wrap.length) {
+    return;
+  }
+  var rows = OPT_STATE.editedRows || [];
+  var byClass = {};
+  var grandTotal = 0;
+  rows.forEach(function (r) {
+    if (!byClass[r.CLASS]) {
+      byClass[r.CLASS] = [];
+    }
+    byClass[r.CLASS].push(r);
+    if (!r.removed) {
+      grandTotal += optNum(r.BERTHS);
+    }
+  });
+  var html = '<span class="opt-berth-summary-pill opt-berth-summary-total">' + grandTotal + ' quota-berths</span>';
+  Object.keys(byClass).sort().forEach(function (cls) {
+    var items = byClass[cls];
+    var clsTotal = items.reduce(function (s, r) { return r.removed ? s : s + optNum(r.BERTHS); }, 0);
+    html += '<button type="button" class="opt-berth-summary-pill opt-berth-summary-jump" data-class="' + optEsc(cls) + '">'
+      + '<span class="opt-cls-badge ' + optClsBadge(cls) + '">' + optEsc(cls) + '</span> '
+      + clsTotal + ' quota-berths</button>';
+  });
+  $wrap.html(html);
+}
+
+function updateAllocationCardDiff($card, row, modified) {
+  var $diff = $card.find('.opt-alloc-diff');
+  if (row.comparisonApplied) {
+    var comparisonHtml = row.comparisonStatus === 'added'
+      ? 'Added: <strong>' + optNum(row.comparisonModifiedBerths) + '</strong>'
+      : 'Original: <strong>' + optNum(row.comparisonOriginalBerths)
+        + '</strong> &rarr; Modified: <strong>' + optNum(row.comparisonModifiedBerths) + '</strong>';
+    $diff.attr('data-was', row.comparisonOriginalBerths == null ? '' : row.comparisonOriginalBerths)
+      .html(comparisonHtml).show();
+    return;
+  }
+  if (modified && !row.isNew && row.origSnapshot) {
+    var wasVal = optNum(row.origSnapshot.BERTHS);
+    if ($diff.attr('data-was') !== String(wasVal)) {
+      $diff.attr('data-was', wasVal).html('Was: <strong>' + wasVal + '</strong>');
+    }
+    if (!$diff.is(':visible')) {
+      $diff.show();
+    }
+    return;
+  }
+  if ($diff.is(':visible') || $diff.attr('data-was')) {
+    $diff.removeAttr('data-was').hide().empty();
+  }
+}
+
+function clearOptimizationApiError() {
+  $('#optApiErrorBanner').remove();
+}
+
+function extractOptimizationApiError(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+  if (payload.success === false) {
+    return String(payload.error || payload.message || 'The optimizer returned an error.').trim();
+  }
+  var data = payload.data != null && typeof payload.data === 'object' ? payload.data : payload;
+  if (data && data.error != null && data.error !== '') {
+    if (typeof data.error === 'string') {
+      return data.error.trim();
+    }
+    if (typeof data.error === 'object' && data.error.message) {
+      return String(data.error.message).trim();
+    }
+    return String(data.error).trim();
+  }
+  if (typeof payload.error === 'string' && payload.error.trim()) {
+    return payload.error.trim();
+  }
+  return '';
+}
+
+function showOptimizationApiError(message, opts) {
+  opts = opts || {};
+  var title = opts.title || 'Optimization unavailable';
+  var detail = message || 'No optimization data came back for this request.';
+  var hint = opts.hint || '';
+  var preserve = opts.preserveWorkspace !== false
+    && OPT_STATE.optimizationLoaded
+    && $('#optBerthTableWrap').length;
+  if (preserve) {
+    var $banner = $('#optApiErrorBanner');
+    if (!$banner.length) {
+      $banner = $('<div id="optApiErrorBanner" class="alert alert-warning opt-api-error-banner" role="alert"></div>');
+      $('#optimizationContent').prepend($banner);
+    }
+    $banner.html(
+      '<div class="opt-api-error-title"><i class="fa fa-exclamation-triangle"></i> '
+      + optEsc(title) + '</div>'
+      + '<div class="opt-api-error-detail">' + optEsc(detail) + '</div>'
+      + '<div class="opt-api-error-hint">'
+      + optEsc(hint || 'Your unsaved quota-berth edits are still here — tweak them and try Re-Optimize again.')
+      + '</div>'
+    ).show();
+    try {
+      var el = $banner.get(0);
+      if (el && el.scrollIntoView) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    } catch (eScroll) { /* ignore */ }
+    updateReoptimizeButton();
+    return;
+  }
+  $('#optimizationContent').html(
+    '<div class="alert alert-info text-center opt-api-empty-state">'
+    + '<div class="opt-api-error-title"><i class="fa fa-inbox"></i> ' + optEsc(title) + '</div>'
+    + '<div class="opt-api-error-detail">' + optEsc(detail) + '</div>'
+    + (hint ? '<div class="opt-api-error-hint">' + optEsc(hint) + '</div>' : '')
+    + '</div>'
+  );
+  OPT_STATE.optimizationLoaded = false;
+  OPT_STATE.hasChanges = false;
+  updateReoptimizeButton();
 }
 
 function mergeDomRowsWithState(domRows) {
@@ -1469,7 +1662,13 @@ function mergeDomRowsWithState(domRows) {
         isNew: !!prev.isNew,
         removed: !!prev.removed,
         origKey: prev.origKey,
-        origSnapshot: prev.origSnapshot
+        origSnapshot: prev.origSnapshot,
+        removedBerthsOrig: prev.removedBerthsOrig,
+        comparisonApplied: !!prev.comparisonApplied,
+        comparisonStatus: prev.comparisonStatus,
+        comparisonLabel: prev.comparisonLabel,
+        comparisonOriginalBerths: prev.comparisonOriginalBerths,
+        comparisonModifiedBerths: prev.comparisonModifiedBerths
       };
     }
     return {
@@ -1507,7 +1706,7 @@ function markOptimizationDirty() {
 
 function countClassChanges(items) {
   return (items || []).filter(function (r) {
-    return r.isNew || isRowModified(r) || r.removed;
+    return r.isNew || isRowModified(r) || (r.removed && !r.comparisonApplied);
   }).length;
 }
 
@@ -1515,10 +1714,19 @@ function computeAllocationDelta(rows) {
   var editedBerths = {};
   // Old keys abandoned by From/To/quota edits — drop from payload; do not send as 0.
   var supersededKeys = [];
+  var liveOrigKeys = {};
+  var tombstoneKeys = {};
 
   (rows || []).forEach(function (r) {
+    if (r.comparisonApplied) {
+      return;
+    }
+    if (r.origKey && !r.removed) {
+      liveOrigKeys[r.origKey] = true;
+    }
     if (r.removed && r.origKey) {
-      // Explicit Remove still zeroes the original allocation.
+      tombstoneKeys[r.origKey] = true;
+      // Simple Remove (card still visible) → pass 0 berths to API.
       editedBerths[r.origKey] = 0;
       return;
     }
@@ -1548,6 +1756,17 @@ function computeAllocationDelta(rows) {
     }
   });
 
+  // Remove + ✕ (permanently dismissed): pass nothing for that key — exclude from payload.
+  (OPT_STATE.deletedKeys || []).forEach(function (key) {
+    if (!key || liveOrigKeys[key] || tombstoneKeys[key]) {
+      return;
+    }
+    delete editedBerths[key];
+    if (supersededKeys.indexOf(key) === -1) {
+      supersededKeys.push(key);
+    }
+  });
+
   return { edited_berths: editedBerths, superseded_keys: supersededKeys };
 }
 
@@ -1564,18 +1783,30 @@ function buildCumulativeReoptimizeDelta(rows) {
   var sessionDelta = computeAllocationDelta(rows);
   var sessionBerths = sessionDelta.edited_berths || {};
   var sessionRemote = computeRemoteDelta();
+  var sessionCoaches = computeCoachDelta().edited_coaches || {};
 
   var editedBerths = Object.assign({}, OPT_STATE.persistedEditedBerths || {});
   Object.keys(sessionBerths).forEach(function (key) {
     editedBerths[key] = sessionBerths[key];
   });
-  // Drop superseded previous keys entirely — never keep/send them as 0 from a route edit.
+  // Drop superseded previous keys entirely — never keep/send them as 0 from a route edit
+  // or a permanently dismissed allocation.
   (sessionDelta.superseded_keys || []).forEach(function (key) {
     delete editedBerths[key];
   });
   Object.keys(sessionBerths).forEach(function (key) {
     if (optNum(sessionBerths[key]) === optNum(OPT_STATE.originalBerths[key])) {
       delete editedBerths[key];
+    }
+  });
+
+  var editedCoaches = Object.assign({}, OPT_STATE.persistedEditedCoaches || {});
+  Object.keys(sessionCoaches).forEach(function (cls) {
+    editedCoaches[cls] = sessionCoaches[cls];
+  });
+  Object.keys(sessionCoaches).forEach(function (cls) {
+    if (optNum(sessionCoaches[cls]) === optNum((OPT_STATE.originalCoaches || {})[cls])) {
+      delete editedCoaches[cls];
     }
   });
 
@@ -1599,6 +1830,7 @@ function buildCumulativeReoptimizeDelta(rows) {
 
   return {
     edited_berths: editedBerths,
+    edited_coaches: editedCoaches,
     remote_added: added,
     remote_removed: removed
   };
@@ -1606,6 +1838,7 @@ function buildCumulativeReoptimizeDelta(rows) {
 
 function persistReoptimizeDelta(delta) {
   OPT_STATE.persistedEditedBerths = Object.assign({}, (delta && delta.edited_berths) || {});
+  OPT_STATE.persistedEditedCoaches = Object.assign({}, (delta && delta.edited_coaches) || {});
   OPT_STATE.persistedRemoteAdded = ensureUniqueCodes((delta && delta.remote_added) || []);
   OPT_STATE.persistedRemoteRemoved = ensureUniqueCodes((delta && delta.remote_removed) || []);
 }
@@ -1646,18 +1879,33 @@ function getRemoteChangeCount() {
   return getPendingRemoteChangeCount();
 }
 
+function getPendingCoachChangeCount() {
+  var edited = OPT_STATE.editedCoaches || {};
+  var original = OPT_STATE.originalCoaches || {};
+  var count = 0;
+  Object.keys(edited).forEach(function (cls) {
+    if (optNum(edited[cls]) !== optNum(original[cls])) {
+      count += 1;
+    }
+  });
+  return count;
+}
+
 function getChangeCounts() {
   var rows = OPT_STATE.editedRows;
   var newCount = rows.filter(function (r) { return r.isNew && !r.removed; }).length;
   var modifiedCount = rows.filter(function (r) { return !r.isNew && !r.removed && isRowModified(r); }).length;
-  var deletedCount = rows.filter(function (r) { return r.removed; }).length;
+  // Only visible removed placeholders count — ✕ dismiss means "pass nothing", so not a pending API delete.
+  var deletedCount = rows.filter(function (r) { return r.removed && !r.comparisonApplied; }).length;
   var remoteChanges = getPendingRemoteChangeCount();
+  var coachChanges = getPendingCoachChangeCount();
   return {
-    total: newCount + modifiedCount + deletedCount + remoteChanges,
+    total: newCount + modifiedCount + deletedCount + remoteChanges + coachChanges,
     newCount: newCount,
     modifiedCount: modifiedCount,
     deleted: deletedCount,
-    remoteChanges: remoteChanges
+    remoteChanges: remoteChanges,
+    coachChanges: coachChanges
   };
 }
 
@@ -1680,7 +1928,7 @@ function getAllocationChangeLabel(row) {
     return '';
   }
   if (row.removed) {
-    return 'Removed \u00b7 0 berths';
+    return removedBerthLabel(row);
   }
   if (row.isNew) {
     return 'New';
@@ -1953,6 +2201,171 @@ function getOptClassOptions() {
   return classes.sort();
 }
 
+function getPhysicalRowField(row, keys) {
+  if (!row) {
+    return '';
+  }
+  for (var i = 0; i < keys.length; i++) {
+    var val = row[keys[i]];
+    if (val != null && String(val).trim() !== '') {
+      return String(val).trim();
+    }
+  }
+  return '';
+}
+
+function getPhysicalCoachCount(row) {
+  return optNum(getPhysicalRowField(row, ['COACH', 'COACHES', 'NUM_COACH', 'coach', 'coaches']));
+}
+
+function getPhysicalBerthCount(row) {
+  return optNum(getPhysicalRowField(row, ['PHY_BERTHS', 'PHYSICAL_BERTHS', 'phy_berths']));
+}
+
+function buildCoachMapsFromProfile(physicalRows) {
+  var coaches = {};
+  var phyBerths = {};
+  (physicalRows || []).forEach(function (row) {
+    var cls = getPhysicalRowField(row, ['CLS', 'CLASS', 'cls', 'class']);
+    if (!cls) {
+      return;
+    }
+    coaches[cls] = getPhysicalCoachCount(row);
+    phyBerths[cls] = getPhysicalBerthCount(row);
+  });
+  return { coaches: coaches, phyBerths: phyBerths };
+}
+
+function restoreCoachesFromPersisted() {
+  OPT_STATE.editedCoaches = OPT_STATE.editedCoaches || {};
+  Object.keys(OPT_STATE.persistedEditedCoaches || {}).forEach(function (cls) {
+    OPT_STATE.editedCoaches[cls] = optNum(OPT_STATE.persistedEditedCoaches[cls]);
+  });
+}
+
+function ensureCoachStateInitialized() {
+  if (OPT_STATE.coachesInitialized) {
+    return;
+  }
+  var built = buildCoachMapsFromProfile((CURRENT_PROFILE && CURRENT_PROFILE.physical) || []);
+  OPT_STATE.originalCoaches = Object.assign({}, built.coaches);
+  OPT_STATE.originalPhyBerths = Object.assign({}, built.phyBerths);
+  OPT_STATE.editedCoaches = Object.assign({}, built.coaches);
+  restoreCoachesFromPersisted();
+  OPT_STATE.coachesInitialized = true;
+}
+
+function syncCoachBaselineAfterOptimize() {
+  var edited = OPT_STATE.editedCoaches || {};
+  var orig = Object.assign({}, OPT_STATE.originalCoaches || {});
+  Object.keys(edited).forEach(function (cls) {
+    orig[cls] = optNum(edited[cls]);
+  });
+  OPT_STATE.originalCoaches = orig;
+  OPT_STATE.persistedEditedCoaches = {};
+}
+
+function getCoachCount(cls) {
+  cls = String(cls || '').trim();
+  if (!cls) {
+    return 0;
+  }
+  if (OPT_STATE.editedCoaches && OPT_STATE.editedCoaches[cls] != null) {
+    return optNum(OPT_STATE.editedCoaches[cls]);
+  }
+  return optNum((OPT_STATE.originalCoaches || {})[cls]);
+}
+
+function getPhyBerthCount(cls) {
+  cls = String(cls || '').trim();
+  return optNum((OPT_STATE.originalPhyBerths || {})[cls]);
+}
+
+function isCoachModified(cls) {
+  return optNum(getCoachCount(cls)) !== optNum((OPT_STATE.originalCoaches || {})[cls]);
+}
+
+function computeCoachDelta() {
+  var edited = OPT_STATE.editedCoaches || {};
+  var original = OPT_STATE.originalCoaches || {};
+  var out = {};
+  Object.keys(edited).forEach(function (cls) {
+    if (optNum(edited[cls]) !== optNum(original[cls])) {
+      out[cls] = optNum(edited[cls]);
+    }
+  });
+  return { edited_coaches: out };
+}
+
+function adjustCoachCount(cls, delta) {
+  cls = String(cls || '').trim();
+  if (!cls || OPT_STATE.reoptimizing) {
+    return;
+  }
+  ensureCoachStateInitialized();
+  var next = Math.max(0, optNum(getCoachCount(cls)) + optNum(delta));
+  OPT_STATE.editedCoaches = OPT_STATE.editedCoaches || {};
+  OPT_STATE.editedCoaches[cls] = next;
+  markOptimizationDirty();
+  refreshCoachCompositionSection();
+  updateReoptimizeButton();
+}
+
+function buildCoachCompositionSection() {
+  ensureCoachStateInitialized();
+  var classes = getOptClassOptions();
+  if (!classes.length) {
+    classes = Object.keys(OPT_STATE.originalCoaches || {}).sort();
+  }
+  if (!classes.length) {
+    return '';
+  }
+  var cards = classes.map(function (cls) {
+    var coaches = getCoachCount(cls);
+    var phy = getPhyBerthCount(cls);
+    var orig = optNum((OPT_STATE.originalCoaches || {})[cls]);
+    var modified = isCoachModified(cls);
+    var delta = coaches - orig;
+    var deltaHtml = modified
+      ? '<span class="opt-coach-delta">was ' + orig + (delta > 0 ? ' · +' + delta : (delta < 0 ? ' · ' + delta : '')) + '</span>'
+      : '';
+    var disabled = OPT_STATE.reoptimizing ? ' disabled' : '';
+    return '<div class="opt-coach-card' + (modified ? ' is-modified' : '') + '" data-class="' + optEsc(cls) + '">'
+      + '<div class="opt-coach-card-head">'
+      + '<span class="opt-cls-badge ' + optClsBadge(cls) + '">' + optEsc(cls) + '</span>'
+      + (modified ? '<span class="opt-coach-badge">Coach changed</span>' : '')
+      + '</div>'
+      + '<div class="opt-coach-stats">'
+      + '<span class="opt-coach-stat"><span class="lbl">Physical berths</span><strong>' + phy + '</strong></span>'
+      + '<span class="opt-coach-stat"><span class="lbl">Coaches</span><strong class="opt-coach-value">' + coaches + '</strong></span>'
+      + '</div>'
+      + deltaHtml
+      + '<div class="opt-coach-stepper">'
+      + '<button type="button" class="btn btn-default btn-xs opt-coach-minus" data-class="' + optEsc(cls) + '"' + disabled + ' title="Remove one coach">−</button>'
+      + '<button type="button" class="btn btn-default btn-xs opt-coach-plus" data-class="' + optEsc(cls) + '"' + disabled + ' title="Add one coach">+</button>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+  return '<div class="opt-coach-section" id="optCoachSection">'
+    + '<div class="opt-coach-head">'
+    + '<span class="opt-coach-title"><i class="fa fa-subway"></i> Train composition</span>'
+    + '<span class="opt-coach-hint">Adjust coaches per class · sent with Re-Optimize</span>'
+    + '</div>'
+    + '<div class="opt-coach-grid">' + cards + '</div>'
+    + '</div>';
+}
+
+function refreshCoachCompositionSection() {
+  var $section = $('#optCoachSection');
+  if (!$section.length) {
+    return;
+  }
+  var $wrap = $section.closest('.opt-coach-section');
+  if ($wrap.length) {
+    $wrap.replaceWith(buildCoachCompositionSection());
+  }
+}
+
 function optSelectOptions(values, selected, placeholder, preserveOrder, titleFn) {
   var list = (values || []).slice();
   if (selected && list.indexOf(selected) === -1) {
@@ -2077,7 +2490,7 @@ function restoreSaveProfileButton($saveBtn, canSave, hasPendingChanges, labelHtm
   if (!OPT_STATE.optimizationLoaded) {
     title = 'Run Show Optimization before saving a profile';
   } else if (hasPendingChanges) {
-    title = 'Re-optimize your changes before saving the profile';
+    title = 'Re-optimize pending changes before saving';
   } else if (!OPT_PROFILE.lastRequestPayload) {
     title = 'No optimization request is available to save';
   }
@@ -2088,7 +2501,8 @@ function restoreSaveProfileButton($saveBtn, canSave, hasPendingChanges, labelHtm
 
 function updateReoptimizeButton() {
   var $btn = $('#optReoptimizeBtn');
-  var $downloadBtn = $('#optDownloadOptimizedProfilePdfBtn');
+  var $downloadBtn = $('#optDownloadOptimizedProfilePdfBtn');  
+  var $downloadMatrixBtn = $('#optDownloadOptimizedMatrixPdfBtn');
   var $saveBtn = $('#optSaveProfileBtn');
   var $saveAsNewBtn = $('#optSaveAsNewProfileBtn');
   var counts = getChangeCounts();
@@ -2098,6 +2512,7 @@ function updateReoptimizeButton() {
     && !hasPendingChanges
     && !OPT_STATE.reoptimizing;
   var isEdit = OPT_PROFILE.profileMode === 'EDIT';
+			   
 
   if (OPT_STATE.reoptimizing) {
     if ($btn.length) {
@@ -2106,6 +2521,7 @@ function updateReoptimizeButton() {
         .attr('title', 'Re-optimization in progress\u2026');
     }
     $downloadBtn.prop('disabled', true);
+    $downloadMatrixBtn.prop('disabled', true);
     restoreSaveProfileButton($saveBtn, false, hasPendingChanges);
     restoreSaveProfileButton($saveAsNewBtn, false, hasPendingChanges,
       '<i class="fa fa-copy"></i> Save as New Profile');
@@ -2123,7 +2539,8 @@ function updateReoptimizeButton() {
       .toggleClass('opt-btn-attn', hasPendingChanges);
   }
 
-  $downloadBtn.prop('disabled', !OPT_STATE.optimizationLoaded || hasPendingChanges);
+  $downloadBtn.prop('disabled', !OPT_STATE.optimizationLoaded || hasPendingChanges);		
+  $downloadMatrixBtn.prop('disabled', !OPT_STATE.optimizationLoaded || hasPendingChanges);
   restoreSaveProfileButton($saveBtn, canSave, hasPendingChanges,
     '<i class="fa fa-save"></i> Save Profile',
     isEdit ? 'Update the selected profile' : 'Save as a new train profile');
@@ -2149,6 +2566,7 @@ function updateChangeSummaryPanel() {
     + '<div class="opt-change-summary-item"><span class="lbl">Total Allocations</span><strong>' + totalAlloc + '</strong></div>'
     + '<div class="opt-change-summary-item opt-summary-success"><span class="lbl">Added</span><strong>' + counts.newCount + '</strong></div>'
     + '<div class="opt-change-summary-item opt-summary-warning"><span class="lbl">Modified</span><strong>' + counts.modifiedCount + '</strong></div>'
+    + '<div class="opt-change-summary-item opt-summary-warning"><span class="lbl">Coaches</span><strong>' + counts.coachChanges + '</strong></div>'
     + '<div class="opt-change-summary-item opt-summary-danger"><span class="lbl">Removed</span><strong>' + counts.deleted + '</strong></div>'
     + '<div class="opt-change-summary-item ' + netCls + '"><span class="lbl">Net Berth Change</span><strong>' + netLabel + '</strong></div>'
     + '</div>'
@@ -2196,9 +2614,10 @@ function refreshAllocationCardStates() {
     var isNew = !!row.isNew;
     var removed = !!row.removed;
     var modified = !isNew && !removed && isRowModified(row);
+    var comparisonStatus = row.comparisonApplied ? row.comparisonStatus : '';
     var qColor = optQuotaColor(row.QUOTA || '');
-    $card.toggleClass('opt-alloc-new', isNew && !removed);
-    $card.toggleClass('opt-alloc-modified', modified);
+    $card.toggleClass('opt-alloc-new', (isNew || comparisonStatus === 'added') && !removed);
+    $card.toggleClass('opt-alloc-modified', modified || comparisonStatus === 'modified');
     $card.toggleClass('opt-alloc-removed', removed);
     $card.attr('data-is-new', isNew ? '1' : '0');
     $card.attr('data-removed', removed ? '1' : '0');
@@ -2217,26 +2636,43 @@ function refreshAllocationCardStates() {
     var $badge = $card.find('.opt-alloc-badge');
     var changeLabel = getAllocationChangeLabel(row);
     if (removed) {
-      $badge.text('Removed \u00b7 0 berths').attr('data-change-type', 'removed').show();
+      $badge.text(removedBerthLabel(row)).attr('data-change-type', 'removed').show();
+      $card.find('.opt-edit-berths').val(0);
     } else if (isNew) {
       $badge.text('New').attr('data-change-type', 'new').show();
+    } else if (comparisonStatus) {
+      $badge.text(row.comparisonLabel || comparisonStatus).attr('data-change-type', comparisonStatus).show();
     } else if (modified && changeLabel) {
       $badge.text(changeLabel).attr('data-change-type', 'modified').show();
     } else {
       $badge.hide().text('');
     }
-    $card.find('.opt-alloc-diff').toggle(!!modified && !isNew && row.origSnapshot).html(
-      modified && row.origSnapshot
-        ? 'Was: <strong>' + optNum(row.origSnapshot.BERTHS) + '</strong>'
-        : ''
-    );
+    updateAllocationCardDiff($card, row, modified);
     $card.find('.opt-del-row').toggle(!removed);
-    $card.find('.opt-restore-row').toggle(!!removed);
+    $card.find('.opt-restore-row').remove();
+    var $footer = $card.find('.opt-alloc-footer');
+    var $dismiss = $card.find('.opt-dismiss-row');
+    if (removed) {
+      if (!$dismiss.length) {
+        $footer.append(
+          '<button type="button" class="btn btn-link opt-dismiss-row" title="Dismiss removed allocation">'
+          + '<i class="fa fa-times"></i></button>'
+        );
+      } else {
+        $dismiss.show();
+      }
+    } else {
+      $dismiss.remove();
+    }
   });
   updateClassHeaders();
   updateReoptimizeButton();
   applyQuotaFocusMode({ scroll: false });
 }
+	
+
+	  
+
 
 function syncAndRefreshChanges(changedRowId) {
   if (OPT_STATE.syncingAllocations) {
@@ -2245,6 +2681,14 @@ function syncAndRefreshChanges(changedRowId) {
   OPT_STATE.syncingAllocations = true;
   try {
     syncEditedRowsFromDom();
+    if (changedRowId != null) {
+      var changedRow = OPT_STATE.editedRows.find(function (r) { return r._rowId === changedRowId; });
+      if (changedRow && changedRow.comparisonApplied) {
+        changedRow.comparisonApplied = false;
+        changedRow.comparisonStatus = '';
+        changedRow.comparisonLabel = '';
+      }
+    }
     var rsChanged = applyRoadSideQuotaRules(OPT_STATE.editedRows, changedRowId);
     if (rsChanged) {
       refreshBerthTableSection();
@@ -2322,7 +2766,7 @@ function focusNewAllocationCard() {
 
 function setOptimizationEditMode(busy) {
   OPT_STATE.reoptimizing = busy;
-  $('#optimizationContent').find('.opt-edit-quota, .opt-edit-from, .opt-edit-to, .opt-edit-berths, .opt-add-row, .opt-del-row, .opt-restore-row, .opt-berth-cls-head, #optReoptimizeBtn')
+  $('#optimizationContent').find('.opt-edit-quota, .opt-edit-from, .opt-edit-to, .opt-edit-berths, .opt-add-row, .opt-del-row, .opt-dismiss-row, .opt-berth-cls-head, #optReoptimizeBtn')
     .prop('disabled', busy);
   if (busy) {
     $('#optBerthExpandAll, #optBerthCollapseAll').addClass('disabled').css('pointer-events', 'none');
@@ -2364,6 +2808,122 @@ function pushNewAllocationRow(cls) {
   refreshBerthTableSection();
 }
 
+function copyAllocationRowsForComparison(rows) {
+  return (rows || []).map(function (r) {
+    return {
+      CLASS: r.CLASS,
+      QUOTA: r.QUOTA,
+      FROM: r.FROM,
+      TO: r.TO,
+      BERTHS: optNum(r.BERTHS),
+      isNew: !!r.isNew,
+      removed: !!r.removed,
+      origKey: r.origKey,
+      removedBerthsOrig: r.removedBerthsOrig,
+      origSnapshot: r.origSnapshot ? Object.assign({}, r.origSnapshot) : null
+    };
+  });
+}
+
+function savedPayloadRowsForComparison(payload) {
+  var body = toOptimizeRequestPayload(payload);
+  var currentByKey = {};
+  ((CURRENT_PROFILE && CURRENT_PROFILE.berths) || []).forEach(function (r) {
+    var current = {
+      CLASS: r.CLS || r.CLASS || '',
+      QUOTA: r.QUOTA_TYPE || r.QUOTA || '',
+      FROM: r.SOURCE || r.FROM || '',
+      TO: r.DESTINATION || r.TO || '',
+      BERTHS: optNum(r.BERTH != null ? r.BERTH : r.BERTHS)
+    };
+    currentByKey[rowToBerthKey(current)] = current;
+  });
+
+  return Object.keys(body.edited_berths || {}).map(function (key) {
+    var parsed = parseBerthKey(key);
+    var original = currentByKey[key];
+    var modifiedBerths = optNum(body.edited_berths[key]);
+    return {
+      CLASS: parsed.cls,
+      QUOTA: parsed.quota,
+      FROM: parsed.from,
+      TO: parsed.to,
+      BERTHS: modifiedBerths,
+      isNew: !original && modifiedBerths > 0,
+      removed: modifiedBerths === 0,
+      origKey: key,
+      removedBerthsOrig: original ? original.BERTHS : 0,
+      origSnapshot: original ? {
+        QUOTA: original.QUOTA,
+        FROM: original.FROM,
+        TO: original.TO,
+        BERTHS: original.BERTHS
+      } : null
+    };
+  });
+}
+
+function applySuccessfulReoptimizeComparison(requestedRows) {
+  var responseByKey = {};
+  (OPT_STATE.editedRows || []).forEach(function (r) {
+    responseByKey[rowToBerthKey(r)] = r;
+  });
+
+  (requestedRows || []).forEach(function (requested) {
+    var status = requested.removed ? 'removed'
+      : (requested.isNew ? 'added' : (isRowModified(requested) ? 'modified' : ''));
+    if (!status) {
+      return;
+    }
+
+    var key = status === 'removed'
+      ? (requested.origKey || rowToBerthKey(requested))
+      : rowToBerthKey(requested);
+    var target = responseByKey[key];
+    if (!target) {
+      target = {
+        _rowId: OPT_STATE.nextRowId++,
+        CLASS: requested.CLASS,
+        QUOTA: requested.QUOTA,
+        FROM: requested.FROM,
+        TO: requested.TO,
+        BERTHS: status === 'removed' ? 0 : optNum(requested.BERTHS),
+        isNew: false,
+        removed: false,
+        origKey: key,
+        origSnapshot: {
+          QUOTA: requested.QUOTA,
+          FROM: requested.FROM,
+          TO: requested.TO,
+          BERTHS: status === 'removed' ? 0 : optNum(requested.BERTHS)
+        }
+      };
+      OPT_STATE.editedRows.push(target);
+      responseByKey[key] = target;
+    }
+
+    var originalBerths = requested.origSnapshot
+      ? optNum(requested.origSnapshot.BERTHS)
+      : getRemovedBerthCount(requested);
+    target.comparisonApplied = true;
+    target.comparisonStatus = status;
+    target.comparisonLabel = status === 'added'
+      ? 'Added'
+      : (status === 'removed' ? removedBerthLabel(requested) : (getAllocationChangeLabel(requested) || 'Modified'));
+    target.comparisonOriginalBerths = status === 'added' ? null : originalBerths;
+    target.comparisonModifiedBerths = status === 'removed' ? 0 : optNum(requested.BERTHS);
+
+    if (status === 'removed') {
+      target.removed = true;
+      target.BERTHS = 0;
+      target.removedBerthsOrig = originalBerths;
+    }
+  });
+
+  OPT_STATE.hasChanges = false;
+  refreshBerthTableSection();
+}
+
 function runReoptimize() {
   if (!SELECTED_TRAIN || !OPT_STATE.optimizationLoaded || OPT_STATE.reoptimizing) {
     return;
@@ -2381,6 +2941,7 @@ function runReoptimize() {
   }
 
   var delta = buildCumulativeReoptimizeDelta(rows);
+  var requestedRows = copyAllocationRowsForComparison(rows);
 
   var fromDate = $('#optFromDate').val();
   var toDate = $('#optToDate').val();
@@ -2393,12 +2954,23 @@ function runReoptimize() {
 
   getReoptimizeData(fromDate, toDate, delta)
     .then(function (response) {
+      if (extractOptimizationApiError(response)
+          || !(response && (response.optimizer_result || (response.data && response.data.optimizer_result)))) {
+        drawOptimizationProfile(response);
+        return;
+      }
       persistReoptimizeDelta(delta);
+      syncCoachBaselineAfterOptimize();
       drawOptimizationProfile(response);
+      applySuccessfulReoptimizeComparison(requestedRows);
     })
     .catch(function (e) {
       console.error(e);
-      alert('Failed to re-optimize profile');
+      showOptimizationApiError(e.message || 'Re-optimize did not complete — network or server issue.', {
+        preserveWorkspace: true,
+        title: 'Re-optimize failed',
+        hint: 'Your unsaved quota-berth edits are still here — fix what you need and retry.'
+      });
     })
     .finally(function () {
       setOptimizationEditMode(false);
@@ -2418,6 +2990,16 @@ function bindOptimizationEditorEvents() {
   $doc.on('click.optEditor', '#optimizationContainer #optRemoteAddBtn', function (e) {
     e.preventDefault();
     addRemoteStationFromInput();
+  });
+
+  $doc.on('click.optEditor', '#optimizationContainer .opt-coach-minus', function (e) {
+    e.preventDefault();
+    adjustCoachCount($(this).attr('data-class'), -1);
+  });
+
+  $doc.on('click.optEditor', '#optimizationContainer .opt-coach-plus', function (e) {
+    e.preventDefault();
+    adjustCoachCount($(this).attr('data-class'), 1);
   });
 
   $doc.on('click.optEditor', '#optimizationContainer .opt-quota-legend-item[data-quota]', function (e) {
@@ -2487,49 +3069,64 @@ function bindOptimizationEditorEvents() {
     if (OPT_STATE.reoptimizing) {
       return;
     }
-    captureExpandedClassPanels();
     syncEditedRowsFromDom();
-    var rowId = parseInt($(this).closest('.opt-alloc-card').attr('data-row-id'), 10);
+    var $card = $(this).closest('.opt-alloc-card');
+    var rowId = parseInt($card.attr('data-row-id'), 10);
     var row = OPT_STATE.editedRows.find(function (r) { return r._rowId === rowId; });
     if (!row) {
       return;
     }
     if (row.isNew) {
       OPT_STATE.editedRows = OPT_STATE.editedRows.filter(function (r) { return r._rowId !== rowId; });
+      $card.remove();
+      refreshBerthSummaryPills();
+      updateClassHeaders();
+      updateChangeSummaryPanel();
     } else {
+      if (row.removedBerthsOrig == null) {
+        row.removedBerthsOrig = getRemovedBerthCount(row);
+      }
       row.removed = true;
       row.BERTHS = 0;
-      if (row.origKey && OPT_STATE.deletedKeys.indexOf(row.origKey) === -1) {
-        OPT_STATE.deletedKeys.push(row.origKey);
+      // Do not add to deletedKeys yet — simple Remove still sends 0. ✕ dismisses fully.
+      $card.find('.opt-edit-berths').val(0);
+      $card.find('.opt-del-row').hide();
+      if (!$card.find('.opt-dismiss-row').length) {
+        $card.find('.opt-alloc-footer').append(
+          '<button type="button" class="btn btn-link opt-dismiss-row" title="Dismiss removed allocation">'
+          + '<i class="fa fa-times"></i></button>'
+        );
       }
+      refreshAllocationCardStates();
+      refreshBerthSummaryPills();
+      updateChangeSummaryPanel();
     }
     markOptimizationDirty();
-    refreshBerthTableSection();
   });
 
-  $doc.on('click.optEditor', '#optimizationContainer .opt-restore-row', function (e) {
+  $doc.on('click.optEditor', '#optimizationContainer .opt-dismiss-row', function (e) {
     e.preventDefault();
     e.stopPropagation();
     if (OPT_STATE.reoptimizing) {
       return;
     }
-    captureExpandedClassPanels();
     syncEditedRowsFromDom();
-    var rowId = parseInt($(this).closest('.opt-alloc-card').attr('data-row-id'), 10);
+    var $card = $(this).closest('.opt-alloc-card');
+    var rowId = parseInt($card.attr('data-row-id'), 10);
     var row = OPT_STATE.editedRows.find(function (r) { return r._rowId === rowId; });
     if (!row) {
       return;
     }
-    row.removed = false;
-    row.BERTHS = row.origSnapshot ? optNum(row.origSnapshot.BERTHS) : optNum(OPT_STATE.originalBerths[row.origKey]);
-    row.QUOTA = row.origSnapshot ? row.origSnapshot.QUOTA : row.QUOTA;
-    row.FROM = row.origSnapshot ? row.origSnapshot.FROM : row.FROM;
-    row.TO = row.origSnapshot ? row.origSnapshot.TO : row.TO;
-    if (row.origKey) {
-      OPT_STATE.deletedKeys = OPT_STATE.deletedKeys.filter(function (k) { return k !== row.origKey; });
+    // Remove + ✕ → permanently dismiss: omit from API (do not pass 0).
+    if (!row.comparisonApplied && row.origKey && OPT_STATE.deletedKeys.indexOf(row.origKey) === -1) {
+      OPT_STATE.deletedKeys.push(row.origKey);
     }
+    OPT_STATE.editedRows = OPT_STATE.editedRows.filter(function (r) { return r._rowId !== rowId; });
+    $card.remove();
+    refreshBerthSummaryPills();
+    updateClassHeaders();
+    updateChangeSummaryPanel();
     markOptimizationDirty();
-    refreshBerthTableSection();
   });
 
   $doc.on('change.optEditor input.optEditor', '#optimizationContainer #optBerthTableWrap .opt-edit-quota, #optimizationContainer #optBerthTableWrap .opt-edit-from, #optimizationContainer #optBerthTableWrap .opt-edit-to, #optimizationContainer #optBerthTableWrap .opt-edit-berths', function () {
@@ -2682,7 +3279,15 @@ function bindOptimizedProfilePdfButton() {
       .on('click.optPdf', function (e) {
         e.preventDefault();
         downloadOptimizedProfilePdf();
-      });
+      });	 
+   $('#optimizationContainer #optDownloadOptimizedMatrixPdfBtn')
+	      .off('click.optMatrixPdf')
+	      .on('click.optMatrixPdf', function (e) {
+	        e.preventDefault();
+	        if (!$(this).prop('disabled')) {
+	          downloadOptimizedMatrixPdf();
+	        }
+	      });
     $('#optimizationContainer #optSaveProfileBtn')
       .off('click.optSave')
       .on('click.optSave', function (e) {
@@ -2786,12 +3391,27 @@ function buildOptimizationTabShell() {
 
 // Entry point after API success — same data split as fontend_raw_modular/js/app.js optimizeProfile().
 function drawOptimizationProfile(responseData) {
+  var preserveWorkspace = OPT_STATE.optimizationLoaded && $('#optBerthTableWrap').length;
   var payload = responseData || {};
+  var embeddedError = extractOptimizationApiError(payload);
+  if (embeddedError) {
+    showOptimizationApiError(embeddedError, {
+      preserveWorkspace: preserveWorkspace,
+      title: /solver|failed|fail/i.test(embeddedError) ? 'Could not optimize' : 'Optimization error',
+      hint: preserveWorkspace
+        ? 'Your unsaved quota-berth changes are still here. Please review your changes and try Re-Optimize again.'
+        : 'Try a different date range, or check that this train has a usable profile.'
+    });
+    return;
+  }
   if (payload.success === false) {
-    $('#optimizationContent').html('<div class="alert alert-danger text-center">' + optEsc(payload.error || 'Optimization failed.') + '</div>');
-    OPT_STATE.optimizationLoaded = false;
-    OPT_STATE.hasChanges = false;
-    updateReoptimizeButton();
+    showOptimizationApiError(payload.error || 'The optimizer returned an error for this train/date range.', {
+      preserveWorkspace: preserveWorkspace,
+      title: 'Could not optimize',
+      hint: preserveWorkspace
+        ? 'Your unsaved quota-berth changes are still here. Please review your changes and try Re-Optimize again.'
+        : 'Try a different date range, or check that this train has a usable profile.'
+    });
     return;
   }
   var data = payload.data != null ? payload.data : payload;
@@ -2800,12 +3420,20 @@ function drawOptimizationProfile(responseData) {
   var optimizedUtil = (data.optimized_analysis && data.optimized_analysis.utilization) || [];
 
   if (!optimizer || !currentUtil.length) {
-    $('#optimizationContent').html('<div class="alert alert-info text-center">No optimization data found.</div>');
-    OPT_STATE.optimizationLoaded = false;
-    OPT_STATE.hasChanges = false;
-    updateReoptimizeButton();
+    showOptimizationApiError(
+      'Nothing to show for this train and date window — the optimizer came back empty.',
+      {
+        preserveWorkspace: preserveWorkspace,
+        title: 'No optimization data',
+        hint: preserveWorkspace
+          ? 'Your unsaved quota-berth changes are still here. Please review your changes and try Re-Optimize again.'
+          : 'Pick another FROM/TO date range and hit Show Optimization again.'
+      }
+    );
     return;
   }
+
+  clearOptimizationApiError();
 
   if (!$('#optimizationContent').length) {
     buildOptimizationTabShell();
@@ -2982,6 +3610,8 @@ function renderOptimizationDashboard(optimizer, currentUtil, optimizedUtil) {
     + '</div>'
     + buildOptimizationSummaryCards(summary)
     + buildRemotesSection(optimizer.remotes || [])
+    // Train composition card temporarily hidden — keep buildCoachCompositionSection() for later.
+    // + buildCoachCompositionSection()
     + buildBerthTableSection(OPT_STATE.editedRows.length ? OPT_STATE.editedRows : berthRows)
     + (hasComparison ? buildOptBerthCompareSection() : '<div class="alert alert-warning">Profile comparison charts need optimized_analysis.utilization from API.</div>')
     + '<div class="opt-footer-compact">'
@@ -2995,8 +3625,11 @@ function renderOptimizationDashboard(optimizer, currentUtil, optimizedUtil) {
     + '" title="Save as the next profile id">'
     + '<i class="fa fa-copy"></i> Save as New Profile'
     + '</button>'
-    + '<button type="button" id="optDownloadOptimizedProfilePdfBtn" class="btn btn-primary" style="margin-right:10px;" title="Download optimized train profile PDF">'
+    + '<button type="button" id="optDownloadOptimizedProfilePdfBtn" class="btn btn-primary" style="margin-right:10px;" title="Download optimized train profile">'
     + '<i class="fa fa-download"></i> Download Optimized Train Profile'
+    + '</button>'
+    + '<button type="button" id="optDownloadOptimizedMatrixPdfBtn" class="btn btn-primary" style="margin-right:10px;" title="Download Comparison">'
+    + '<i class="fa fa-download"></i> Download Comparison'
     + '</button>'
     + '<button type="button" id="optReoptimizeBtn" class="btn btn-primary" disabled>Re-Optimize</button>'
     + '</div></div>';
@@ -3010,6 +3643,7 @@ function renderOptimizationDashboard(optimizer, currentUtil, optimizedUtil) {
     renderOptimizationCharts(curMetrics, optMetrics);
   }
 }
+					   
 
 // fontend_raw_modular renderOptimizerMetrics() card layout.
 function buildOptimizationSummaryCards(summary) {
@@ -3527,7 +4161,27 @@ var stations = Object.keys(routeStations)
   });
 });
 return stations;
-}
+}					 
+											 
+function groupAllocationMatricesByClass(berths) {
+	  var byClass = {};
+	  (berths || []).map(optNormalizeProfileBerthRow).forEach(function (r) {
+	    if (!r.cls || !r.from || !r.to || r.berths <= 0) return;
+	    if (!byClass[r.cls]) byClass[r.cls] = { cells: {}, rows: [] };
+	    var key = r.from + '-' + r.to;
+	    if (!byClass[r.cls].cells[key]) byClass[r.cls].cells[key] = [];
+	    byClass[r.cls].cells[key].push((r.quota || '-') + '[' + r.berths + ']');
+	    byClass[r.cls].rows.push(r);
+	  });
+	  return byClass;
+	}
+
+	function groupProposedAllocationMatricesByClass() {
+	  return groupAllocationMatricesByClass(getProposedBerthsForCompare());
+	}
+	function groupExistingAllocationMatricesByClass() {
+		  return groupAllocationMatricesByClass((CURRENT_PROFILE && CURRENT_PROFILE.berths) || []);
+		}
   function groupProposedAllocationMatricesByClass() {
     var byClass = {};
     getProposedBerthsForCompare().map(optNormalizeProfileBerthRow).forEach(function (r) {
@@ -3592,8 +4246,11 @@ return stations;
 //              })
 //          );
 //      });
-//  }
-  function buildProposedAllocationStationMatrixRows(matrix) {
+//  }			
+
+
+
+function buildProposedAllocationStationMatrixRows(matrix) {
       var stations = getOptimizationMatrixStations(matrix.rows);
       // Keep only stations having at least one allocation
       stations = stations.filter(function(stn) {
@@ -3746,7 +4403,420 @@ return stations;
     }
   }
   window.downloadOptimizedProfilePdf = downloadOptimizedProfilePdf;
+ 
+	  function downloadOptimizedMatrixPdf() {
+		  try {
+		    var jsPdfCtor = window.jspdf && window.jspdf.jsPDF;
 
+		    if (!jsPdfCtor) {
+		      alert('PDF download library is not available. Please refresh the page and try again.');
+		      return;
+		    }
+
+		    var doc = new jsPdfCtor({
+		      orientation: 'landscape',
+		      unit: 'mm',
+		      format: 'a4'
+		    });
+
+		    if (typeof doc.autoTable !== 'function') {
+		      alert('PDF table library is not available. Please refresh the page and try again.');
+		      return;
+		    }
+
+		    var details = getOptimizedProfileDetailsForPdf();
+
+		    var existingMatricesByClass = groupExistingAllocationMatricesByClass();
+		    var proposedMatricesByClass = groupProposedAllocationMatricesByClass();
+
+		    var classMap = {};
+
+		    Object.keys(existingMatricesByClass).forEach(function (cls) {
+		      classMap[cls] = true;
+		    });
+
+		    Object.keys(proposedMatricesByClass).forEach(function (cls) {
+		      classMap[cls] = true;
+		    });
+
+		    var classes = Object.keys(classMap).sort();
+
+		    if (!classes.length) {
+		      alert('No allocation matrix data available to download.');
+		      return;
+		    }
+
+		    addOptimizedPdfHeader(doc, details);
+
+		    var y = 72;
+
+		    classes.forEach(function (cls, idx) {
+
+		      var matrices = [
+		        {
+		          label: 'Existing allocation matrix',
+		          matrix: existingMatricesByClass[cls],
+		          color: [100, 116, 139],
+		          fill: [241, 245, 249]
+		        },
+		        {
+		          label: 'Proposed allocation matrix',
+		          matrix: proposedMatricesByClass[cls],
+		          color: [27, 79, 216],
+		          fill: [239, 246, 255]
+		        }
+		      ];
+
+		      matrices.forEach(function (version, versionIdx) {
+
+		        var matrix = version.matrix;
+
+		        if (!matrix || !matrix.rows || !matrix.rows.length) {
+		          return;
+		        }
+
+		        var stations = getOptimizationMatrixStations(matrix.rows).filter(function (stn) {
+		          return matrix.rows.some(function (r) {
+		            return r.from === stn || r.to === stn;
+		          });
+		        });
+
+		        if ((idx > 0 || versionIdx > 0) && y > 145) {
+
+		          doc.addPage();
+
+		          doc.setFillColor(27, 79, 216);
+		          doc.rect(0, 0, 297, 25, 'F');
+
+		          doc.setTextColor(255, 255, 255);
+		          doc.setFontSize(18);
+		          doc.setFont(undefined, 'bold');
+
+		          doc.text(
+		            'Train Quota Profile Optimization Utility',
+		            14,
+		            16
+		          );
+
+		          y = 30;
+		        }
+
+		        doc.setTextColor(
+		          version.color[0],
+		          version.color[1],
+		          version.color[2]
+		        );
+
+		        doc.setFontSize(12);
+		        doc.setFont(undefined, 'bold');
+
+		        doc.text(
+		          'Class ' + cls + ' - ' + version.label,
+		          14,
+		          y
+		        );
+
+		        doc.autoTable({
+		          startY: y + 4,
+
+		          head: [
+		            ['Station'].concat(stations)
+		          ],
+
+		          body: buildProposedAllocationStationMatrixRows(matrix),
+
+		          theme: 'grid',
+
+		          pageBreak: 'auto',
+
+		          styles: {
+		            fontSize: 8,
+		            cellPadding: 2,
+		            overflow: 'linebreak',
+		            halign: 'center',
+		            valign: 'middle'
+		          },
+
+		          headStyles: {
+		            fillColor: version.color,
+		            textColor: [255, 255, 255],
+		            fontStyle: 'bold'
+		          },
+
+		          bodyStyles: {
+		            fillColor: version.fill,
+		            textColor: [31, 47, 77],
+		            fontStyle: 'bold'
+		          },
+
+		          alternateRowStyles: {
+		            fillColor: [232, 246, 238]
+		          },
+
+		          margin: {
+		            left: 14,
+		            right: 14
+		          }
+		        });
+
+		        y = doc.lastAutoTable.finalY + 14;
+		      });
+		    });
+
+		    var hasUtilMetrics =
+		      OPT_STATE.currentUtil &&
+		      OPT_STATE.currentUtil.length &&
+		      OPT_STATE.optimizedUtil &&
+		      OPT_STATE.optimizedUtil.length;
+
+		    if (hasUtilMetrics) {
+
+		      doc.addPage();
+
+		      doc.setFillColor(27, 79, 216);
+		      doc.rect(0, 0, 297, 25, 'F');
+
+		      doc.setTextColor(255, 255, 255);
+		      doc.setFontSize(18);
+		      doc.setFont(undefined, 'bold');
+
+		      doc.text(
+		        'Train Quota Profile Optimization Utility',
+		        14,
+		        16
+		      );
+
+		      var metricY = 40;
+
+		      var curM = optSumMetrics(OPT_STATE.currentUtil);
+		      var optM = optSumMetrics(OPT_STATE.optimizedUtil);
+
+		      var curUtilPct =
+		        curM.tKm > 0
+		          ? (curM.sKm / curM.tKm) * 100
+		          : 0;
+
+		      var optUtilPct =
+		        optM.tKm > 0
+		          ? (optM.sKm / optM.tKm) * 100
+		          : 0;
+
+		      var metricRows = [
+
+		        {
+		          label: 'Total berths',
+		          curVal: optFmtNum(curM.cap),
+		          propVal: optFmtNum(optM.cap),
+		          delta: optM.cap - curM.cap,
+		          isPct: false,
+		          invert: false
+		        },
+
+		        {
+		          label: 'Utilized berths',
+		          curVal: optFmtNum(curM.served),
+		          propVal: optFmtNum(optM.served),
+		          delta: optM.served - curM.served,
+		          isPct: false,
+		          invert: false
+		        },
+
+		        {
+		          label: 'KM utilization %',
+		          curVal: curUtilPct.toFixed(2) + '%',
+		          propVal: optUtilPct.toFixed(2) + '%',
+		          delta: optUtilPct - curUtilPct,
+		          isPct: true,
+		          invert: false
+		        },
+
+		        {
+		          label: 'Unserved demand',
+		          curVal: optFmtNum(curM.unserved),
+		          propVal: optFmtNum(optM.unserved),
+		          delta: optM.unserved - curM.unserved,
+		          isPct: false,
+		          invert: true
+		        },
+
+		        {
+		          label: 'Revenue earned',
+		          curVal: optFmtCurrency(curM.rev),
+		          propVal: optFmtCurrency(optM.rev),
+		          delta: Math.round(optM.rev - curM.rev),
+		          isPct: false,
+		          invert: false
+		        }
+
+		      ];
+
+		      function optFmtCurrency(value) {
+		        if (value == null || isNaN(value)) {
+		          return '0';
+		        }
+
+		        return Math.round(Number(value)).toLocaleString('en-IN');
+		      }
+
+		      var fmtDelta = function (n, isPct) {
+
+		        var sign = n > 0 ? '+' : '';
+
+		        return isPct
+		          ? sign + (Math.round(n * 100) / 100).toFixed(2) + '%'
+		          : sign + optFmtNum(n);
+
+		      };
+
+		      doc.setTextColor(38, 56, 92);
+		      doc.setFontSize(12);
+		      doc.setFont(undefined, 'bold');
+
+		      doc.text(
+		        'Utilization Metrics',
+		        14,
+		        metricY
+		      );
+
+		      doc.autoTable({
+
+		        startY: metricY + 4,
+
+		        head: [[
+		          'Metric',
+		          'Current Profile (Average per day)',
+		          'Delta',
+		          'Proposed Profile (Average per day)'
+		        ]],
+
+		        body: metricRows.map(function (r) {
+		          return [
+		            r.label,
+		            r.curVal,
+		            fmtDelta(r.delta, r.isPct),
+		            r.propVal
+		          ];
+		        }),
+
+		        theme: 'grid',
+
+		        styles: {
+		          fontSize: 9,
+		          cellPadding: 3,
+		          halign: 'center',
+		          valign: 'middle'
+		        },
+
+		        headStyles: {
+		          fillColor: [27, 79, 216],
+		          textColor: [255, 255, 255],
+		          fontStyle: 'bold'
+		        },
+
+		        bodyStyles: {
+		          textColor: [31, 47, 77]
+		        },
+
+		        columnStyles: {
+		          0: {
+		            halign: 'left',
+		            fontStyle: 'bold'
+		          },
+
+		          3: {
+		            fillColor: [239, 246, 255],
+		            fontStyle: 'bold'
+		          }
+		        },
+
+		        didParseCell: function (data) {
+
+		          if (
+		            data.section === 'body' &&
+		            data.column.index === 2
+		          ) {
+
+		            var r = metricRows[data.row.index];
+		            var n = r.delta;
+
+		            var isGood = r.invert ? n < 0 : n > 0;
+		            var isBad = r.invert ? n > 0 : n < 0;
+
+		            data.cell.styles.fontStyle = 'bold';
+
+		            data.cell.styles.textColor =
+		              n === 0
+		                ? [107, 107, 102]
+		                : (
+		                    isGood
+		                      ? [10, 124, 78]
+		                      : (
+		                          isBad
+		                            ? [229, 115, 115]
+		                            : [107, 107, 102]
+		                        )
+		                  );
+		          }
+		        },
+
+		        margin: {
+		          left: 14,
+		          right: 14
+		        }
+
+		      });
+
+		      /* ================================
+		         NOTES AFTER UTILIZATION TABLE
+		         ================================ */
+
+		      var notesY = doc.lastAutoTable.finalY + 10;
+
+		      doc.setTextColor(38, 56, 92);
+		      doc.setFontSize(9);
+		      doc.setFont(undefined, 'bold');
+
+		      doc.text(
+		        'Note :-',
+		        14,
+		        notesY
+		      );
+
+		      doc.setFont(undefined, 'normal');
+
+		      doc.text(
+		        '1. The figures in utilization metrics are as per expected predicted demand.',
+		        18,
+		        notesY + 6
+		      );
+
+		      doc.text(
+		        '2. The performance is based on the booking time pattern of the train.',
+		        18,
+		        notesY + 12
+		      );
+		    }
+
+		    var fileName =
+		      'optimized-train-profile- Comapritive Optimization and Utilization Metrics ' +
+		      String(details.trainNo).replace(/[^a-z0-9_-]+/gi, '-') +
+		      '-' +
+		      String(details.profileDate).replace(/[^a-z0-9_-]+/gi, '-') +
+		      '.pdf';
+
+		    doc.save(fileName);
+
+		  } catch (e) {
+
+		    console.error(e);
+
+		    alert(
+		      'Failed to generate optimized profile PDF. Please try again.'
+		    );
+		  }
+		}
+
+		window.downloadOptimizedMatrixPdf = downloadOptimizedMatrixPdf;
 function buildOptBerthCompareSection() {
   var classes = getOptCompareClasses();
   var active = OPT_STATE.compareClass || classes[0] || '';
@@ -3833,20 +4903,30 @@ function buildAllocCard(r, cls, stations, quotas, disabled, allRows) {
   var isNew = !!r.isNew;
   var removed = !!r.removed;
   var modified = !isNew && !removed && isRowModified(r);
+  var comparisonStatus = r.comparisonApplied ? r.comparisonStatus : '';
   var qColor = optQuotaColor(r.QUOTA || (isNew ? '' : '-'));
   var changeLabel = getAllocationChangeLabel(r);
-  var stateCls = removed ? ' opt-alloc-removed' : (isNew ? ' opt-alloc-new' : (modified ? ' opt-alloc-modified' : ''));
+  var stateCls = removed ? ' opt-alloc-removed'
+    : ((isNew || comparisonStatus === 'added') ? ' opt-alloc-new'
+      : ((modified || comparisonStatus === 'modified') ? ' opt-alloc-modified' : ''));
   var cardDisabled = removed ? ' disabled' : disabled;
   var badge = removed
-    ? '<span class="opt-alloc-badge" data-change-type="removed">Removed \u00b7 0 berths</span>'
-    : ((isNew || (modified && changeLabel))
-      ? '<span class="opt-alloc-badge" data-change-type="' + (isNew ? 'new' : 'modified') + '">' + optEsc(changeLabel || (isNew ? 'New' : 'Modified')) + '</span>'
+    ? '<span class="opt-alloc-badge" data-change-type="removed">' + optEsc(removedBerthLabel(r)) + '</span>'
+    : ((isNew || comparisonStatus || (modified && changeLabel))
+      ? '<span class="opt-alloc-badge" data-change-type="' + (comparisonStatus || (isNew ? 'new' : 'modified')) + '">'
+        + optEsc(r.comparisonLabel || changeLabel || (isNew ? 'New' : 'Modified')) + '</span>'
       : '<span class="opt-alloc-badge" style="display:none;"></span>');
   var quotaLabel = r.QUOTA ? optEsc(r.QUOTA) : 'Quota';
   var quotaPillTitle = r.QUOTA ? quotaTitleAttr(r.QUOTA) : '';
-  var diffHtml = modified && r.origSnapshot
-    ? '<span class="opt-alloc-diff">Was: <strong>' + optNum(r.origSnapshot.BERTHS) + '</strong></span>'
-    : '';
+  var diffHtml = '';
+  if (r.comparisonApplied) {
+    diffHtml = r.comparisonStatus === 'added'
+      ? '<span class="opt-alloc-diff">Added: <strong>' + optNum(r.comparisonModifiedBerths) + '</strong></span>'
+      : '<span class="opt-alloc-diff">Original: <strong>' + optNum(r.comparisonOriginalBerths)
+        + '</strong> &rarr; Modified: <strong>' + optNum(r.comparisonModifiedBerths) + '</strong></span>';
+  } else if (modified && r.origSnapshot) {
+    diffHtml = '<span class="opt-alloc-diff">Was: <strong>' + optNum(r.origSnapshot.BERTHS) + '</strong></span>';
+  }
   var availableQuotas = removed ? quotas : getAvailableQuotasForRow(r, quotas, allRows || OPT_STATE.editedRows);
   return '<div class="opt-alloc-card' + stateCls + '" data-row-id="' + rowId + '" data-class="' + optEsc(cls) + '" data-is-new="' + (isNew ? '1' : '0') + '" data-removed="' + (removed ? '1' : '0') + '" data-quota="' + optEsc(r.QUOTA || '') + '" data-from="' + optEsc(r.FROM || '') + '" data-to="' + optEsc(r.TO || '') + '" style="--opt-quota-color:' + (removed ? '#94a3b8' : qColor) + ';">'
     + '<div class="opt-alloc-accent"></div>'
@@ -3869,7 +4949,7 @@ function buildAllocCard(r, cls, stations, quotas, disabled, allRows) {
     + '<div class="opt-alloc-footer">'
     + diffHtml
     + (removed
-      ? '<button type="button" class="btn btn-link opt-restore-row"' + disabled + '><i class="fa fa-undo"></i> Restore</button>'
+      ? '<button type="button" class="btn btn-link opt-dismiss-row" title="Dismiss removed allocation"' + disabled + '><i class="fa fa-times"></i></button>'
       : '<button type="button" class="btn btn-link opt-del-row"' + disabled + '><i class="fa fa-trash"></i> Remove</button>')
     + '</div>'
     + '</div>';
