@@ -127,11 +127,14 @@ function loadTrainOptimization() {
 		return;
 	}
 
+	var hadWorkspace = OPT_STATE.optimizationLoaded && $('#optBerthTableWrap').length;
 	var $btn = $('#showOptimizationBtn');
 	$btn.prop('disabled', true).text('Loading Data...');
-	$('#optimizationContent').html(
-		'<div class="text-center" style="padding:24px;"><i class="fa fa-spinner fa-spin"></i> Loading optimization data...</div>'
-	);
+	if (!hadWorkspace) {
+		$('#optimizationContent').html(
+			'<div class="text-center" style="padding:24px;"><i class="fa fa-spinner fa-spin"></i> Loading optimization data...</div>'
+		);
+	}
 
 	getOptimizationData(fromDate, toDate)
 		.then(function (response) {
@@ -139,6 +142,7 @@ function loadTrainOptimization() {
 			if (OPT_PROFILE.profileMode === 'EDIT' && OPT_PROFILE.profilePayload) {
 				persistReoptimizeDelta({
 					edited_berths: OPT_PROFILE.profilePayload.edited_berths || {},
+					edited_coaches: OPT_PROFILE.profilePayload.edited_coaches || {},
 					remote_added: OPT_PROFILE.profilePayload.remote_added || [],
 					remote_removed: OPT_PROFILE.profilePayload.remote_removed || []
 				});
@@ -147,10 +151,13 @@ function loadTrainOptimization() {
 		})
 		.catch(function (error) {
 			console.error(error);
-			alert(error.message || 'Failed to fetch optimization data');
-			$('#optimizationContent').html(
-				'<div class="alert alert-danger text-center">Failed to load optimization data.</div>'
-			);
+			showOptimizationApiError(error.message || 'Could not reach the optimization service.', {
+				preserveWorkspace: hadWorkspace,
+				title: 'No optimization data',
+				hint: hadWorkspace
+					? 'Your unsaved quota-berth edits are still here — you can keep editing or retry Show Optimization.'
+					: 'Check the date range and try Show Optimization again.'
+			});
 		})
 		.finally(function () {
 			$btn.prop('disabled', false).text('Show Optimization');
