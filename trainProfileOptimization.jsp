@@ -90,6 +90,22 @@
 .opt-remote-removed{background:#fdecea;color:#c0392b;border-color:#f5c6c0;padding-right:26px;cursor:default}
 .opt-remote-restore{position:absolute;top:50%;right:5px;transform:translateY(-50%);border:none;background:transparent;color:#c0392b;font-size:10px;line-height:1;padding:0;cursor:pointer;opacity:.75}
 .opt-remote-restore:hover{opacity:1}
+.opt-coach-section{margin-bottom:12px;padding:12px 14px;background:#fff;border:1px solid #e8ecf4;border-radius:10px}
+.opt-coach-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.opt-coach-title{font-size:11px;font-weight:700;color:#667085;letter-spacing:.05em;text-transform:uppercase}
+.opt-coach-title .fa{margin-right:6px;color:#1b4fd8}
+.opt-coach-hint{font-size:10px;color:#98a2b3;font-weight:600}
+.opt-coach-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.opt-coach-card{border:1px solid #e3e6ef;border-radius:10px;padding:10px 12px;background:#fafbfe;position:relative}
+.opt-coach-card.is-modified{border-color:#f0b429;background:#fffdf5;box-shadow:0 0 0 1px rgba(240,180,41,.15)}
+.opt-coach-card-head{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:8px}
+.opt-coach-badge{font-size:9px;font-weight:700;color:#b45309;background:#fef3c7;border:1px solid #fde68a;border-radius:999px;padding:2px 7px;white-space:nowrap}
+.opt-coach-stats{display:flex;gap:12px;margin-bottom:6px}
+.opt-coach-stat .lbl{display:block;font-size:9px;font-weight:700;color:#98a2b3;text-transform:uppercase;letter-spacing:.04em}
+.opt-coach-stat strong{font-size:16px;color:#1f2937}
+.opt-coach-delta{display:block;font-size:10px;color:#b45309;font-weight:600;margin-bottom:8px}
+.opt-coach-stepper{display:flex;gap:6px}
+.opt-coach-stepper .btn{min-width:32px;height:28px;font-size:16px;font-weight:700;line-height:1;padding:0}
 .opt-table-card{background:#fff;border:1px solid #e3e6ef;border-radius:10px;padding:16px;margin-bottom:16px}
 .opt-compare-card{background:#fff;border:1px solid #e3e6ef;border-radius:10px;padding:18px;margin-bottom:16px}
 .opt-cmp-grid{display:grid;grid-template-columns:1fr 72px 1fr;border:1px solid #e3e6ef;border-radius:10px;overflow:hidden;margin-bottom:16px}
@@ -194,12 +210,19 @@
 .opt-alloc-footer{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:2px;min-height:22px}
 .opt-alloc-diff{font-size:10px;color:#888}
 .opt-alloc-diff strong{color:#555}
+.opt-api-error-banner{margin:0;padding:12px 16px;border-radius:8px;font-size:13px;border:1px solid #d9534f;background:#fff1f0;color:#8b1e1e;position:fixed;top:44px;right:18px;width:620px;max-width:calc(100vw - 36px);z-index:1040;box-shadow:0 6px 18px rgba(139,30,30,.22)}
+.opt-api-error-title{font-weight:700;margin-bottom:4px;font-size:14px}
+.opt-api-error-detail{margin-bottom:4px;font-weight:600}
+.opt-api-error-hint{font-size:12px;opacity:.95}
+.opt-api-empty-state{padding:18px 16px}
 .opt-alloc-error{font-size:10px;color:var(--opt-danger,#c0392b);font-weight:600;flex:1}
 .opt-alloc-card .opt-del-row{padding:0;font-size:10px;color:var(--opt-danger,#c0392b);margin-left:auto;flex-shrink:0}
 .opt-alloc-card .opt-del-row:hover{color:#922b21}
 .opt-cls-modified-count{color:#e67e22;font-weight:700}
 .opt-cls-removed-count{color:var(--opt-danger,#c0392b);font-weight:700}
-.opt-alloc-card .opt-restore-row{padding:0;font-size:10px;color:var(--opt-info,#1b4fd8);margin-left:auto;flex-shrink:0}
+.opt-alloc-card .opt-dismiss-row{padding:2px 8px;font-size:16px;line-height:1;color:#64748b;margin-left:auto;flex-shrink:0;min-width:28px}
+.opt-alloc-card .opt-dismiss-row:hover{color:var(--opt-danger,#c0392b)}
+.opt-alloc-card.opt-alloc-removed .opt-dismiss-row{display:inline-block !important;color:#94a3b8}
 .opt-berth-cls-warn{font-size:11px;font-weight:700;color:#e67e22;white-space:nowrap}
 .opt-action-bar-spacer{display:none}
 .opt-footer-compact{margin-top:16px;padding:12px 16px;border-top:1px solid #e3e6ef;position:sticky;bottom:0;background:#fff;z-index:30;box-shadow:0 -6px 16px rgba(15,23,42,.06);border-radius:0 0 10px 10px}
@@ -743,8 +766,8 @@
 	</c:if>
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.26' />"></script>
-<script src="<c:url value='/resources/js/setTrainProfileOptimization.js?version=23.10' />"></script>
+<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.34' />"></script>
+<script src="<c:url value='/resources/js/setTrainProfileOptimization.js?version=23.13' />"></script>
 <script src="<c:url value='/resources/js/setTrainProfileOptimizationUtilization.js?version=23.2' />"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
