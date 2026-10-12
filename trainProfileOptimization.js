@@ -297,7 +297,311 @@ function renderDemandFromRows(rows, holidays){
       && (!quota || demandField(r, ['QUOTA_TYPE','QUOTA'])===quota);
   });
   updateDemandChart(filtered, DEMAND_MODE, holidays);
+  // Remote matrix needs all OD pairs; only class/quota filters apply.
+  var remoteRows = rows.filter(function (r) {
+    return (!cls || demandField(r, ['CLS', 'CLASS']) === cls)
+      && (!quota || demandField(r, ['QUOTA_TYPE', 'QUOTA']) === quota);
+  });
+  renderRemoteWiseDemand(remoteRows);
 }
+
+/** Route stations in order, with F_REM_LOC remote flag. */
+function getDemandRouteStations() {
+  var route = (CURRENT_PROFILE && CURRENT_PROFILE.route) || [];
+  var out = [];
+  var seen = {};
+  route.forEach(function (r) {
+    var code = String(r.STN_CODE || '').trim();
+    if (!code || seen[code]) {
+      return;
+    }
+    seen[code] = true;
+    out.push({
+      code: code,
+      isRemote: String(r.F_REM_LOC || r.f_rem_loc || '').toUpperCase() === 'Y'
+        || String(r.IS_REMOTE || r.is_remote || '').toUpperCase() === 'Y'
+        || r.IS_REMOTE === true || r.is_remote === true
+    });
+  });
+  return out;
+}
+
+/** Remotes in route order — F_REM_LOC / IS_REMOTE; termini always included. */
+function getRemoteStationsForDemand() {
+  var stations = getDemandRouteStations();
+  if (!stations.length) {
+    return [];
+  }
+  var remotes = [];
+  stations.forEach(function (s, idx) {
+    if (s.isRemote || idx === 0 || idx === stations.length - 1) {
+      remotes.push(s.code);
+    }
+  });
+  return remotes;
+}
+
+/**
+ * Map each station to origin-remote (preceding remote) and dest-remote (succeeding remote).
+ * Non-remotes: origin groups with previous remote; destination groups with next remote.
+ */
+function buildRemoteSegmentMaps(stations, remotes) {
+  var remoteSet = {};
+  remotes.forEach(function (r) { remoteSet[r] = true; });
+  var originRemote = {};
+  var destRemote = {};
+  var lastRemote = null;
+  var i;
+  for (i = 0; i < stations.length; i++) {
+    var code = stations[i].code;
+    if (remoteSet[code]) {
+      lastRemote = code;
+    }
+    if (lastRemote) {
+      originRemote[code] = lastRemote;
+    }
+  }
+  var nextRemote = null;
+  for (i = stations.length - 1; i >= 0; i--) {
+    code = stations[i].code;
+    if (remoteSet[code]) {
+      nextRemote = code;
+    }
+    if (nextRemote) {
+      destRemote[code] = nextRemote;
+    }
+  }
+  return { originRemote: originRemote, destRemote: destRemote };
+}
+
+function demandPsgnValue(row) {
+  return Number(row.TOT_PSGN || row.tot_psgn || row.DEMAND || row.demand || 0) || 0;
+}
+
+/**
+ * Aggregate OD demand into remote×remote matrices (overall + per class).
+ * Values are average per distinct journey date in the filtered rows.
+ */
+function buildRemoteWiseDemandData(rows) {
+  rows = rows || [];
+  var stations = getDemandRouteStations();
+  var remotes = getRemoteStationsForDemand();
+  var empty = { remotes: remotes, overall: {}, byClass: {}, dayCount: 0 };
+  if (remotes.length < 2 || !stations.length) {
+    return empty;
+  }
+  var maps = buildRemoteSegmentMaps(stations, remotes);
+  var dates = {};
+  var overall = {};
+  var byClass = {};
+
+  rows.forEach(function (r) {
+    var from = String(demandField(r, ['FROM_STN', 'SOURCE']) || '').trim();
+    var to = String(demandField(r, ['TO_STN', 'DESTINATION']) || '').trim();
+    var cls = String(demandField(r, ['CLS', 'CLASS']) || '').trim() || '-';
+    var date = String(r.JOURNEY_DATE || '').trim();
+    var val = demandPsgnValue(r);
+    if (!from || !to || !val) {
+      return;
+    }
+    var fromRemote = maps.originRemote[from];
+    var toRemote = maps.destRemote[to];
+    if (!fromRemote || !toRemote || fromRemote === toRemote) {
+      return;
+    }
+    // Only forward remote pairs (origin remote before dest remote on route)
+    var fi = remotes.indexOf(fromRemote);
+    var ti = remotes.indexOf(toRemote);
+    if (fi < 0 || ti < 0 || fi >= ti) {
+      return;
+    }
+    if (date) {
+      dates[date] = true;
+    }
+    var key = fromRemote + '|' + toRemote;
+    overall[key] = (overall[key] || 0) + val;
+    if (!byClass[cls]) {
+      byClass[cls] = {};
+    }
+    byClass[cls][key] = (byClass[cls][key] || 0) + val;
+  });
+
+  var dayCount = Object.keys(dates).length || 1;
+  function avgMap(map) {
+    var out = {};
+    Object.keys(map).forEach(function (k) {
+      out[k] = Math.round(map[k] / dayCount);
+    });
+    return out;
+  }
+  var avgByClass = {};
+  Object.keys(byClass).forEach(function (cls) {
+    avgByClass[cls] = avgMap(byClass[cls]);
+  });
+  return {
+    remotes: remotes,
+    overall: avgMap(overall),
+    byClass: avgByClass,
+    dayCount: dayCount
+  };
+}
+
+function buildRemoteDemandMatrixHtml(title, remotes, values) {
+  remotes = remotes || [];
+  values = values || {};
+  if (remotes.length < 2) {
+    return '<div class="remote-demand-empty">Remote stations not available for this train.</div>';
+  }
+  var html = '<div class="remote-demand-block"><h5>' + optEsc(title) + '</h5>'
+    + '<div class="remote-demand-table-wrap"><table class="remote-demand-table"><thead><tr><th></th>';
+  remotes.forEach(function (r) {
+    html += '<th>' + optEsc(r) + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+  remotes.forEach(function (from, fi) {
+    html += '<tr><td class="row-head">' + optEsc(from) + '</td>';
+    remotes.forEach(function (to, ti) {
+      var val = 0;
+      if (fi < ti) {
+        val = values[from + '|' + to] || 0;
+      }
+      html += '<td' + (val === 0 ? ' class="zero"' : '') + '>' + val + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+function renderRemoteWiseDemand(rows) {
+  var overallWrap = byId('remoteDemandOverallWrap');
+  var classWrap = byId('remoteDemandClassWrap');
+  if (!overallWrap || !classWrap) {
+    return;
+  }
+  var data = buildRemoteWiseDemandData(rows);
+  window.CURRENT_REMOTE_DEMAND_DATA = data;
+  if (!data.remotes.length) {
+    overallWrap.innerHTML = '<div class="remote-demand-empty">Load a train profile to view remote-wise demand.</div>';
+    classWrap.innerHTML = '';
+    return;
+  }
+  if (data.remotes.length < 2) {
+    overallWrap.innerHTML = '<div class="remote-demand-empty">At least two remote stations are required.</div>';
+    classWrap.innerHTML = '';
+    return;
+  }
+  overallWrap.innerHTML = buildRemoteDemandMatrixHtml('Overall Remote Demand', data.remotes, data.overall);
+  var classes = Object.keys(data.byClass).sort();
+  if (!classes.length) {
+    classWrap.innerHTML = '<div class="remote-demand-empty">No class-wise remote demand for the selected filters.</div>';
+    return;
+  }
+  classWrap.innerHTML = '<div class="remote-demand-block"><h5>Class-wise Remote Demand</h5></div>'
+    + classes.map(function (cls) {
+      return buildRemoteDemandMatrixHtml(cls, data.remotes, data.byClass[cls]);
+    }).join('');
+}
+window.renderRemoteWiseDemand = renderRemoteWiseDemand;
+
+function downloadRemoteWiseDemandPdf() {
+  try {
+    var jsPdfCtor = window.jspdf && window.jspdf.jsPDF;
+    if (!jsPdfCtor) {
+      alert('PDF download library is not available. Please refresh the page and try again.');
+      return;
+    }
+    var data = window.CURRENT_REMOTE_DEMAND_DATA;
+    if (!data || !data.remotes || !data.remotes.length) {
+      var cls = byId('demandClass') ? byId('demandClass').value : '';
+      var quota = byId('demandQuota') ? byId('demandQuota').value : '';
+      var remoteRows = (CURRENT_DEMAND_ROWS || []).filter(function (r) {
+        return (!cls || demandField(r, ['CLS', 'CLASS']) === cls)
+          && (!quota || demandField(r, ['QUOTA_TYPE', 'QUOTA']) === quota);
+      });
+      data = buildRemoteWiseDemandData(remoteRows);
+    }
+    if (!data || !data.remotes || data.remotes.length < 2) {
+      alert('No remote-wise demand data available to download.');
+      return;
+    }
+    var doc = new jsPdfCtor({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    if (typeof doc.autoTable !== 'function') {
+      alert('PDF table library is not available. Please refresh the page and try again.');
+      return;
+    }
+    var trainNo = SELECTED_TRAIN ? getTrainNumber(SELECTED_TRAIN) : '-';
+    var trainName = SELECTED_TRAIN ? getTrainName(SELECTED_TRAIN) : '';
+    var sd = byId('demandFrom') ? byId('demandFrom').value : '';
+    var ed = byId('demandTo') ? byId('demandTo').value : '';
+    var created = new Date();
+    var createdStr = ('0' + created.getDate()).slice(-2) + '-'
+      + ('0' + (created.getMonth() + 1)).slice(-2) + '-'
+      + created.getFullYear();
+    var sdFmt = (sd || '').replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3-$2-$1') || sd;
+    var edFmt = (ed || '').replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3-$2-$1') || ed;
+
+    doc.setFillColor(27, 79, 216);
+    doc.rect(0, 0, 297, 28, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text('Remote-wise Demand', 14, 12);
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.text('Train: ' + trainNo + (trainName ? ' - ' + trainName : ''), 14, 20);
+    doc.text('Period: ' + sdFmt + ' to ' + edFmt + '   |   Profile Creation Date: ' + createdStr, 14, 25);
+
+    var y = 36;
+    doc.setTextColor(31, 47, 77);
+    doc.setFontSize(9);
+    doc.text('Note: Demand between remotes is the sum of all OD pairs mapped to that remote pair. Average demand is shown for the selected date range.', 14, y, { maxWidth: 270 });
+    y += 10;
+
+    function matrixBody(remotes, values) {
+      return remotes.map(function (from, fi) {
+        return [from].concat(remotes.map(function (to, ti) {
+          return (fi < ti) ? String(values[from + '|' + to] || 0) : '0';
+        }));
+      });
+    }
+
+    function addMatrix(title, remotes, values) {
+      if (y > 160) {
+        doc.addPage();
+        y = 20;
+      }
+      doc.setTextColor(27, 79, 216);
+      doc.setFontSize(11);
+      doc.setFont(undefined, 'bold');
+      doc.text(title, 14, y);
+      doc.autoTable({
+        startY: y + 3,
+        head: [[''].concat(remotes)],
+        body: matrixBody(remotes, values || {}),
+        theme: 'grid',
+        styles: { fontSize: 7, cellPadding: 1.5, halign: 'center', valign: 'middle' },
+        headStyles: { fillColor: [27, 79, 216], textColor: [255, 255, 255], fontStyle: 'bold' },
+        columnStyles: { 0: { fillColor: [238, 243, 255], textColor: [27, 79, 216], fontStyle: 'bold', halign: 'left' } },
+        margin: { left: 14, right: 14 }
+      });
+      y = doc.lastAutoTable.finalY + 12;
+    }
+
+    addMatrix('Overall Remote Demand', data.remotes, data.overall);
+    Object.keys(data.byClass || {}).sort().forEach(function (cls) {
+      addMatrix('Class ' + cls, data.remotes, data.byClass[cls]);
+    });
+
+    var fileName = 'remote-wise-demand-' + String(trainNo).replace(/[^a-z0-9_-]+/gi, '-')
+      + '-' + String(sd).replace(/[^a-z0-9_-]+/gi, '-') + '.pdf';
+    doc.save(fileName);
+  } catch (e) {
+    console.error(e);
+    alert('Failed to generate remote-wise demand PDF. Please try again.');
+  }
+}
+window.downloadRemoteWiseDemandPdf = downloadRemoteWiseDemandPdf;
 function setDemandButtonLoading(isLoading){
   var applyBtn = byId('applyDemandBtn');
   if (!applyBtn) return;
@@ -353,6 +657,7 @@ function loadDemandForSelectedTrain(forceFetch){
     CURRENT_HOLIDAYS = [];
     CURRENT_DEMAND_DATE_KEY = '';
     updateDemandChart([], DEMAND_MODE, []);
+    renderRemoteWiseDemand([]);
     alert('Failed to fetch demand data');
   }).then(function(){
     setDemandButtonLoading(false);
@@ -444,6 +749,7 @@ function apiFetchTrainOptimization(
 	    profileDate,
 	    fromDate,
 	    toDate,
+	    endToEnd,
 	    reoptDelta
 	) {
 
@@ -453,7 +759,10 @@ function apiFetchTrainOptimization(
 	            siteId,
 	            profileDate,
 	            fromDate,
-	            toDate
+	            toDate,
+	            endToEnd.flag,
+	            endToEnd.fromStation,
+	            endToEnd.toStation
 	        ]
 	    };
 
@@ -465,13 +774,10 @@ function apiFetchTrainOptimization(
 	            reoptDelta.edited_berths;
 	    }
 
-	    if (reoptDelta &&
-	        reoptDelta.edited_coaches &&
-	        Object.keys(reoptDelta.edited_coaches).length) {
-
-	        requestData.edited_coaches =
-	            reoptDelta.edited_coaches;
-	    }
+	    // Always send full current composition (composite keys "CLS|BERTH_COMP").
+	    var composition = buildFullCompositionPayload();
+	    requestData.edited_coaches = composition.edited_coaches;
+	    requestData.edited_phy_berths = composition.edited_phy_berths;
 
 	    if (reoptDelta &&
 	        Array.isArray(reoptDelta.remote_added) &&
@@ -497,6 +803,59 @@ function apiFetchTrainOptimization(
 	        '/newtemplatebasedmis/webapi/typeOne/getTrainOptimization'
 	    );
 	}
+function getOptimizationRouteStations() {
+	  var route = (CURRENT_PROFILE && CURRENT_PROFILE.route) || [];
+	  var seen = {};
+	  return route.map(function (station) { return station.STN_CODE; }).filter(function (station) {
+	    if (!station || seen[station]) return false;
+	    seen[station] = true;
+	    return true;
+	  });
+	}
+
+	function populateOptimizationEndToEndStations() {
+	  var stations = getOptimizationRouteStations();
+	  setSelectOptions('optEndToEndFromStation', stations, 'Select station');
+	  setSelectOptions('optEndToEndToStation', stations, 'Select station');
+	}
+
+	function updateOptimizationEndToEndFields() {
+	  var isEndToEnd = $('#optTrainType').val() === 'END_TO_END';
+	  $('#optEndToEndStations').toggle(isEndToEnd);
+	  $('#optEndToEndFromStation, #optEndToEndToStation').prop('disabled', !isEndToEnd);
+	  if (!isEndToEnd) {
+	    $('#optEndToEndFromStation, #optEndToEndToStation').val('');
+	  }
+	}
+
+	function getOptimizationEndToEndSelection() {
+	  var isEndToEnd = $('#optTrainType').val() === 'END_TO_END';
+	  return {
+	    flag: isEndToEnd ? 'Y' : 'N',
+	    fromStation: isEndToEnd ? ($('#optEndToEndFromStation').val() || '') : '',
+	    toStation: isEndToEnd ? ($('#optEndToEndToStation').val() || '') : ''
+	  };
+	}
+	function validateOptimizationEndToEndSelection() {
+	    var trainType = $('#optTrainType').val();
+	    if (!trainType) return true;
+
+	    if (trainType !== 'END_TO_END') return true;
+	    var selection = getOptimizationEndToEndSelection();
+	    var stations = getOptimizationRouteStations();
+
+	    if (!selection.fromStation || !selection.toStation) {
+	        alert('Please select End to End FROM and TO stations');
+	        return false;
+	    }
+
+	    if (stations.indexOf(selection.fromStation) >= stations.indexOf(selection.toStation)) {
+	        alert('End to End FROM station must be before End to End TO station');
+	        return false;
+	    }
+
+	    return true;
+	}
 
 function captureOptimizeRequestPayload(requestData) {
   try {
@@ -508,12 +867,20 @@ function captureOptimizeRequestPayload(requestData) {
 
 function applySavedOptimizePayloadToState(payload, opts) {
   var body = toOptimizeRequestPayload(payload);
+  var migratedCoaches = migrateCompositionKeyMaps(
+    body.edited_coaches || {},
+    body.edited_berth_comp || {}
+  );
   OPT_STATE.persistedEditedBerths = Object.assign({}, body.edited_berths || {});
-  OPT_STATE.persistedEditedCoaches = Object.assign({}, body.edited_coaches || {});
+  OPT_STATE.persistedEditedCoaches = Object.assign({}, migratedCoaches.coaches);
+  OPT_STATE.persistedEditedBerthComp = Object.assign({}, migratedCoaches.berthComp);
+  OPT_STATE.persistedEditedPhyBerths = Object.assign({}, body.edited_phy_berths || {});
   OPT_STATE.persistedRemoteAdded = ensureUniqueCodes(body.remote_added || []);
   OPT_STATE.persistedRemoteRemoved = ensureUniqueCodes(body.remote_removed || []);
   restoreRemoteStateFromPersisted();
+  ensureCoachStateInitialized();
   restoreCoachesFromPersisted();
+  renderPreOptimizeComposition();
   // Skip when Show Optimization should keep the user's current UI dates.
   if (!(opts && opts.skipDates)) {
     applyOptDatesFromPayload(body);
@@ -589,13 +956,20 @@ function restoreDefaultOptDates() {
 function postSavedOptimizePayload(payload) {
   // Only fields RequestParameters accepts — strip start_date/end_date etc. that break Jackson.
   var src = payload || {};
+  var composition = buildFullCompositionPayload();
   var requestData = {
     params: Array.isArray(src.params) ? src.params.slice() : [],
     edited_berths: src.edited_berths || {},
-    edited_coaches: src.edited_coaches || {},
+    edited_coaches: composition.edited_coaches,
+    edited_phy_berths: composition.edited_phy_berths,
     remote_added: src.remote_added || [],
     remote_removed: src.remote_removed || []
   };
+  var endToEnd = getOptimizationEndToEndSelection();
+  while (requestData.params.length < 5) requestData.params.push('');
+  requestData.params[5] = endToEnd.flag;
+  requestData.params[6] = endToEnd.fromStation;
+  requestData.params[7] = endToEnd.toStation;
   captureOptimizeRequestPayload(requestData);
   logOptimizationRequest('savedProfile', null, requestData);
   return getWebServiceDataTrain(
@@ -767,6 +1141,8 @@ function toOptimizeRequestPayload(loaded, trainNo) {
       params: src.params.slice(),
       edited_berths: src.edited_berths || {},
       edited_coaches: src.edited_coaches || {},
+      edited_berth_comp: src.edited_berth_comp || {},
+      edited_phy_berths: src.edited_phy_berths || {},
       remote_added: src.remote_added || [],
       remote_removed: src.remote_removed || []
     };
@@ -782,6 +1158,8 @@ function toOptimizeRequestPayload(loaded, trainNo) {
     ],
     edited_berths: src.edited_berths || {},
     edited_coaches: src.edited_coaches || {},
+    edited_berth_comp: src.edited_berth_comp || {},
+    edited_phy_berths: src.edited_phy_berths || {},
     remote_added: src.remote_added || [],
     remote_removed: src.remote_removed || []
   };
@@ -864,6 +1242,7 @@ function setOptProfileMode(mode) {
   OPT_PROFILE.selectedProfileId = '';
   OPT_PROFILE.profilePayload = null;
   OPT_PROFILE.lastRequestPayload = null;
+  OPT_PROFILE.profileSaved = false;
   clearOptimizationWorkspace();
   var $wrap = $('#optProfileSelectWrap');
   $wrap.toggleClass('is-visible', OPT_PROFILE.profileMode === 'EDIT');
@@ -901,11 +1280,15 @@ function loadSelectedOptimizationProfile(profileId) {
     persistReoptimizeDelta({
       edited_berths: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_berths) || {},
       edited_coaches: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_coaches) || {},
+      edited_berth_comp: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_berth_comp) || {},
+      edited_phy_berths: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.edited_phy_berths) || {},
       remote_added: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.remote_added) || [],
       remote_removed: (OPT_PROFILE.profilePayload && OPT_PROFILE.profilePayload.remote_removed) || []
     });
     drawOptimizationProfile(response);
     applySuccessfulReoptimizeComparison(savedComparisonRows);
+    OPT_PROFILE.profileSaved = true;
+    updateOptProfileStatus();
   }).catch(function (error) {
     console.error(error);
     alert(error.message || 'Failed to load saved profile');
@@ -937,7 +1320,7 @@ function saveOptimizationProfile(saveAsNew) {
     syncEditedRowsFromDom();
   }
   if (getChangeCounts().total > 0) {
-    alert('Please re-optimize pending changes before saving the profile.');
+    alert('Please Re-Optimize your changes first, then save the profile.');
     updateReoptimizeButton();
     return;
   }
@@ -948,6 +1331,8 @@ function saveOptimizationProfile(saveAsNew) {
     var delta = buildCumulativeReoptimizeDelta(OPT_STATE.editedRows);
     payload.edited_berths = delta.edited_berths || payload.edited_berths || {};
     payload.edited_coaches = delta.edited_coaches || payload.edited_coaches || {};
+    payload.edited_phy_berths = delta.edited_phy_berths || payload.edited_phy_berths || {};
+    delete payload.edited_berth_comp;
     payload.remote_added = delta.remote_added || payload.remote_added || [];
     payload.remote_removed = delta.remote_removed || payload.remote_removed || [];
   }
@@ -974,6 +1359,7 @@ function saveOptimizationProfile(saveAsNew) {
     if (!profileId || String(profileId).length > 10) {
       throw new Error('Cannot allocate PROFILE_ID (max 10 chars) for train ' + trainNo);
     }
+    var composition = buildFullCompositionPayload();
     var requestData = {
       params: [
         trainNo,
@@ -985,7 +1371,8 @@ function saveOptimizationProfile(saveAsNew) {
         ($('.username').text() || '').trim()
       ],
       edited_berths: payload.edited_berths || {},
-      edited_coaches: payload.edited_coaches || {},
+      edited_coaches: composition.edited_coaches,
+      edited_phy_berths: composition.edited_phy_berths,
       remote_added: payload.remote_added || [],
       remote_removed: payload.remote_removed || []
     };
@@ -997,6 +1384,7 @@ function saveOptimizationProfile(saveAsNew) {
       rememberSavedProfileId(trainNo, siteId, profileId);
       OPT_PROFILE.selectedProfileId = profileId;
       OPT_PROFILE.profilePayload = payload;
+      OPT_PROFILE.profileSaved = true;
       alert(updateCurrent
         ? ('Profile ' + profileId + ' updated successfully.')
         : ('Profile ' + profileId + ' saved as a new profile.'));
@@ -1122,6 +1510,7 @@ function searchTrain(){
     renderClassPills(classes);
     refreshCurrentProfile();
     initDemandFilters(profile);
+    populateOptimizationEndToEndStations();
     CURRENT_DEMAND_ROWS = [];
     CURRENT_HOLIDAYS = [];
     CURRENT_DEMAND_DATE_KEY = '';
@@ -1133,6 +1522,9 @@ function searchTrain(){
     byId('tabsSection').style.display = 'block';
     if (typeof refreshOptimizationProfileList === 'function') {
       refreshOptimizationProfileList();
+    }
+    if (typeof renderPreOptimizeComposition === 'function') {
+      renderPreOptimizeComposition();
     }
   }).catch(function(e){ console.error(e); alert('Failed to fetch train data'); })
   .then(function(){ btn.disabled = false; btn.textContent = 'Fetch Train Information'; });
@@ -1159,6 +1551,7 @@ function getUtilizationData(fromDate, toDate){
 function hasPersistedOptimizationConstraints() {
   return Object.keys(OPT_STATE.persistedEditedBerths || {}).length > 0
     || Object.keys(OPT_STATE.persistedEditedCoaches || {}).length > 0
+    || Object.keys(OPT_STATE.persistedEditedBerthComp || {}).length > 0
     || (OPT_STATE.persistedRemoteAdded || []).length > 0
     || (OPT_STATE.persistedRemoteRemoved || []).length > 0;
 }
@@ -1167,12 +1560,14 @@ function buildPersistedOnlyDelta() {
   return {
     edited_berths: Object.assign({}, OPT_STATE.persistedEditedBerths || {}),
     edited_coaches: Object.assign({}, OPT_STATE.persistedEditedCoaches || {}),
+    edited_phy_berths: Object.assign({}, OPT_STATE.persistedEditedPhyBerths || {}),
     remote_added: ensureUniqueCodes(OPT_STATE.persistedRemoteAdded || []),
     remote_removed: ensureUniqueCodes(OPT_STATE.persistedRemoteRemoved || [])
   };
 }
 
 function getOptimizationData(fromDate, toDate){
+	var endToEnd = getOptimizationEndToEndSelection();
 	if (OPT_PROFILE.profileMode === 'EDIT') {
 		if (!OPT_PROFILE.selectedProfileId) {
 			return Promise.reject(new Error('Select a saved profile'));
@@ -1199,15 +1594,25 @@ function getOptimizationData(fromDate, toDate){
 		} else {
 			delta = buildPersistedOnlyDelta();
 		}
+	} else {
+		delta = {
+			edited_berths: {},
+			remote_added: [],
+			remote_removed: []
+		};
 	}
-	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, delta);
+	// Full composition is always attached inside apiFetchTrainOptimization.
+	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, endToEnd, delta);
+//	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, delta);
 }
 
 // Re-optimize uses same POST endpoint with edited_berths in JSON body.
 function getReoptimizeData(fromDate, toDate, delta) {
+	var endToEnd = getOptimizationEndToEndSelection();
 	var trainNo = getTrainNumber(SELECTED_TRAIN);
 	var siteId = getSiteId(SELECTED_TRAIN);
-	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, delta);
+	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, endToEnd, delta);
+//	return apiFetchTrainOptimization(trainNo, siteId, SELECTED_TRAIN.PROFILE_DATE, fromDate, toDate, delta);
 }
 
 document.addEventListener('DOMContentLoaded', function(){
@@ -1231,6 +1636,13 @@ document.addEventListener('DOMContentLoaded', function(){
   byId('modeDaily').addEventListener('click', function(){ setMode('daily'); renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS); });
   byId('modeWeekly').addEventListener('click', function(){ setMode('weekly'); renderDemandFromRows(CURRENT_DEMAND_ROWS, CURRENT_HOLIDAYS); });
   byId('applyDemandBtn').addEventListener('click', function(e){ e.preventDefault(); loadDemandForSelectedTrain(true); });
+  var remotePdfBtn = byId('downloadRemoteDemandPdfBtn');
+  if (remotePdfBtn) {
+    remotePdfBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      downloadRemoteWiseDemandPdf();
+    });
+  }
   var demandTabLink = document.querySelector('a[href="#tab2"]');
   if (demandTabLink) {
     demandTabLink.addEventListener('click', function(){ window.setTimeout(function(){ loadDemandForSelectedTrain(false); }, 150); });
@@ -1293,22 +1705,43 @@ var OPT_STATE = {
   originalCoaches: {},
   originalPhyBerths: {},
   editedCoaches: {},
+  // Berths per coach (BERTH_COMP) per coach type — editable from class_berth_comp options.
+  // Values stay as API strings so mixed coaches ("1A+2A" -> "10+20") survive round-trips.
+  originalBerthComp: {},
+  editedBerthComp: {},
+  persistedEditedBerthComp: {},
+  // Berths per real class after splitting mixed coaches — derived, sent for the optimizer.
+  persistedEditedPhyBerths: {},
+  // Coach types shown in the composition strip = physical_comp units + ones the user added.
+  compositionClasses: [],
+  addedClasses: [],
   coachesInitialized: false,
+  // Frozen baseline from CURRENT_PROFILE — used for Added/Modified/Removed tags (not reopt baseline).
+  profileCoaches: {},
+  profileBerthComp: {},
+  profilePhyBerths: {},
   // Quota Focus Mode — multi-select legend filters (persists across re-optimize redraws).
   focusedQuotas: [],
   // Route Highlight Filter — From/To pair focus (compatible with quota focus).
-  routeFocus: { from: '', to: '' }
+  routeFocus: { from: '', to: '' },
+  // Last capacity-violation from a failed re-optimize (drives red allocation highlights).
+  capacityViolation: null,
+  // Class-wise seat capacity from last optimize response (edited_coaches / edited_phy_berths).
+  classCapacity: {}
 };
 var OPT_DATES_TOUCHED = { opt: false, util: false };
 var OPT_DEFAULT_FROM_OFFSET = 61;
 var OPT_DEFAULT_TO_OFFSET = 90;
 var OPT_TOP_IMPACT_LIMIT = 10;
+var OPT_MAX_COACHES_TOTAL = 22;
 
 var OPT_PROFILE = {
   profileMode: 'CREATE',
   selectedProfileId: '',
   profilePayload: null,
   lastRequestPayload: null,
+  // True only while the shown result matches what is stored against selectedProfileId.
+  profileSaved: false,
   savedIdsByKey: {},
   listRequestSeq: 0
 };
@@ -1325,6 +1758,8 @@ function logOptimizationRequest(action, reoptDelta, body) {
     requestDelta: reoptDelta ? {
       edited_berths: Object.assign({}, (reoptDelta.edited_berths) || {}),
       edited_coaches: Object.assign({}, (reoptDelta.edited_coaches) || {}),
+      edited_berth_comp: Object.assign({}, (reoptDelta.edited_berth_comp) || {}),
+      edited_phy_berths: Object.assign({}, (reoptDelta.edited_phy_berths) || {}),
       remote_added: (reoptDelta.remote_added || []).slice(),
       remote_removed: (reoptDelta.remote_removed || []).slice()
     } : null,
@@ -1336,6 +1771,7 @@ function resetOptimizationState() {
   OPT_PROFILE.selectedProfileId = '';
   OPT_PROFILE.profilePayload = null;
   OPT_PROFILE.lastRequestPayload = null;
+  OPT_PROFILE.profileSaved = false;
   clearOptimizationWorkspace();
 }
 window.resetOptimizationState = resetOptimizationState;
@@ -1367,10 +1803,22 @@ function clearOptimizationWorkspace() {
   OPT_STATE.originalCoaches = {};
   OPT_STATE.originalPhyBerths = {};
   OPT_STATE.editedCoaches = {};
+  OPT_STATE.originalBerthComp = {};
+  OPT_STATE.editedBerthComp = {};
+  OPT_STATE.persistedEditedBerthComp = {};
+  OPT_STATE.persistedEditedPhyBerths = {};
+  OPT_STATE.compositionClasses = [];
+  OPT_STATE.addedClasses = [];
   OPT_STATE.coachesInitialized = false;
+  OPT_STATE.profileCoaches = {};
+  OPT_STATE.profileBerthComp = {};
+  OPT_STATE.profilePhyBerths = {};
   OPT_STATE.focusedQuotas = [];
   OPT_STATE.routeFocus = { from: '', to: '' };
+  OPT_STATE.capacityViolation = null;
+  OPT_STATE.classCapacity = {};
   $('#optimizationContent').html('');
+  $('#optPreCompositionWrap').html('').hide();
   updateReoptimizeButton();
 }
 
@@ -1392,11 +1840,30 @@ function getRouteStationOrder() {
   var order = {};
   var route = (CURRENT_PROFILE && CURRENT_PROFILE.route) || [];
   route.forEach(function (s, idx) {
-    var code = s.STN_CODE || s.stn_code || '';
+    var code = String(s.STN_CODE || s.stn_code || '').trim();
     if (code && order[code] === undefined) {
       order[code] = idx;
     }
   });
+  // Enrich / replace from the painted route strip so intermediate stations are always present.
+  if (typeof $ !== 'undefined' && $('#routeInfo .route-node').length) {
+    var domOrder = {};
+    $('#routeInfo .route-node').each(function (idx) {
+      var code = String($(this).find('.route-label, .route-label-active').first().text() || '').trim();
+      if (code && code !== '-' && domOrder[code] === undefined) {
+        domOrder[code] = idx;
+      }
+    });
+    if (!Object.keys(order).length) {
+      order = domOrder;
+    } else {
+      Object.keys(domOrder).forEach(function (code) {
+        if (order[code] === undefined) {
+          order[code] = domOrder[code];
+        }
+      });
+    }
+  }
   return order;
 }
 
@@ -1404,7 +1871,20 @@ function stationRouteIndex(code, orderMap) {
   if (!code) {
     return 9999;
   }
-  return orderMap[code] !== undefined ? orderMap[code] : 9999;
+  code = String(code).trim();
+  orderMap = orderMap || getRouteStationOrder();
+  if (orderMap[code] !== undefined) {
+    return orderMap[code];
+  }
+  // Case-insensitive fallback for station codes.
+  var upper = code.toUpperCase();
+  var key;
+  for (key in orderMap) {
+    if (Object.prototype.hasOwnProperty.call(orderMap, key) && String(key).toUpperCase() === upper) {
+      return orderMap[key];
+    }
+  }
+  return 9999;
 }
 
 function compareAllocRows(a, b) {
@@ -1550,13 +2030,9 @@ function refreshBerthSummaryPills() {
 
 function updateAllocationCardDiff($card, row, modified) {
   var $diff = $card.find('.opt-alloc-diff');
+  // Comparison / payload tags use the badge only — no Original → Modified line.
   if (row.comparisonApplied) {
-    var comparisonHtml = row.comparisonStatus === 'added'
-      ? 'Added: <strong>' + optNum(row.comparisonModifiedBerths) + '</strong>'
-      : 'Original: <strong>' + optNum(row.comparisonOriginalBerths)
-        + '</strong> &rarr; Modified: <strong>' + optNum(row.comparisonModifiedBerths) + '</strong>';
-    $diff.attr('data-was', row.comparisonOriginalBerths == null ? '' : row.comparisonOriginalBerths)
-      .html(comparisonHtml).show();
+    $diff.removeAttr('data-was').hide().empty();
     return;
   }
   if (modified && !row.isNew && row.origSnapshot) {
@@ -1576,6 +2052,199 @@ function updateAllocationCardDiff($card, row, modified) {
 
 function clearOptimizationApiError() {
   $('#optApiErrorBanner').remove();
+  clearCapacityViolationHighlights();
+}
+
+/**
+ * Parse optimizer capacity errors like:
+ * "Optimizer failed: Capacity violation: class=1A, segment=OTP -> PGT, used=48, capacity=10, excess=38"
+ */
+function parseCapacityViolation(message) {
+  var text = String(message || '');
+  if (!/capacity\s*violation/i.test(text)) {
+    return null;
+  }
+  var clsMatch = text.match(/class\s*=\s*([A-Za-z0-9+]+)/i);
+  var segMatch = text.match(/segment\s*=\s*([A-Za-z0-9]+)\s*(?:->|→|-)\s*([A-Za-z0-9]+)/i);
+  if (!clsMatch || !segMatch) {
+    return null;
+  }
+  var usedMatch = text.match(/used\s*=\s*(-?\d+)/i);
+  var capMatch = text.match(/capacity\s*=\s*(-?\d+)/i);
+  var excessMatch = text.match(/excess\s*=\s*(-?\d+)/i);
+  return {
+    cls: String(clsMatch[1] || '').trim(),
+    from: String(segMatch[1] || '').trim(),
+    to: String(segMatch[2] || '').trim(),
+    used: usedMatch ? optNum(usedMatch[1]) : null,
+    capacity: capMatch ? optNum(capMatch[1]) : null,
+    excess: excessMatch ? optNum(excessMatch[1]) : null
+  };
+}
+
+/** True when allocation From→To traverses the violated segment (segment lies on the path). */
+function allocationCoversSegment(allocFrom, allocTo, segFrom, segTo) {
+  var order = getRouteStationOrder();
+  var aFrom = stationRouteIndex(allocFrom, order);
+  var aTo = stationRouteIndex(allocTo, order);
+  var sFrom = stationRouteIndex(segFrom, order);
+  var sTo = stationRouteIndex(segTo, order);
+  if (aFrom >= 9999 || aTo >= 9999 || sFrom >= 9999 || sTo >= 9999) {
+    return false;
+  }
+  if (aFrom > aTo) {
+    var swap = aFrom;
+    aFrom = aTo;
+    aTo = swap;
+  }
+  if (sFrom > sTo) {
+    swap = sFrom;
+    sFrom = sTo;
+    sTo = swap;
+  }
+  return aFrom <= sFrom && aTo >= sTo;
+}
+
+function clearCapacityViolationHighlights(opts) {
+  opts = opts || {};
+  if (!opts.keepState) {
+    OPT_STATE.capacityViolation = null;
+  }
+  $('#optBerthTableWrap .opt-alloc-card')
+    .removeClass('opt-alloc-capacity-hit opt-alloc-focus')
+    .removeAttr('title');
+  $('#optBerthTableWrap .opt-alloc-capacity-hint').remove();
+  $('#routeInfo .route-node').removeClass('opt-route-violation');
+  $('#routeInfo .route-wrapper').removeClass('opt-route-has-violation');
+  $('#routeInfo .opt-route-violation-band').remove();
+}
+
+function highlightRouteSegment(segFrom, segTo) {
+  var order = getRouteStationOrder();
+  var sFrom = stationRouteIndex(segFrom, order);
+  var sTo = stationRouteIndex(segTo, order);
+  if (sFrom >= 9999 || sTo >= 9999) {
+    return;
+  }
+  if (sFrom > sTo) {
+    var swap = sFrom;
+    sFrom = sTo;
+    sTo = swap;
+  }
+  var $nodes = $('#routeInfo .route-node');
+  if (!$nodes.length) {
+    return;
+  }
+  var $wrapper = $('#routeInfo .route-wrapper').addClass('opt-route-has-violation');
+  var firstEl = null;
+  var lastEl = null;
+  $nodes.each(function (idx) {
+    var code = String($(this).find('.route-label, .route-label-active').first().text() || '').trim();
+    var at = stationRouteIndex(code, order);
+    if (at >= sFrom && at <= sTo) {
+      $(this).addClass('opt-route-violation');
+      if (!firstEl) {
+        firstEl = this;
+      }
+      lastEl = this;
+    }
+  });
+  // Paint a red band over the violated edge(s) between the first and last marked nodes.
+  if (firstEl && lastEl && $wrapper.length) {
+    var wrapLeft = $wrapper.offset().left;
+    var left = $(firstEl).offset().left + $(firstEl).outerWidth() / 2 - wrapLeft;
+    var right = $(lastEl).offset().left + $(lastEl).outerWidth() / 2 - wrapLeft;
+    if (right < left) {
+      var t = left;
+      left = right;
+      right = t;
+    }
+    $wrapper.append(
+      '<div class="opt-route-violation-band" style="left:' + left + 'px;width:' + Math.max(8, right - left) + 'px;"></div>'
+    );
+  }
+}
+
+function applyCapacityViolationHighlights(violation) {
+  clearCapacityViolationHighlights({ keepState: true });
+  if (!violation || !violation.cls || !violation.from || !violation.to) {
+    OPT_STATE.capacityViolation = null;
+    return;
+  }
+  OPT_STATE.capacityViolation = violation;
+  if (!$('#optBerthTableWrap').length) {
+    return;
+  }
+
+  // Prefer live DOM values — editedRows can lag the selects after a failed re-optimize.
+  if (typeof syncEditedRowsFromDom === 'function') {
+    try { syncEditedRowsFromDom(); } catch (eSync) { /* ignore */ }
+  }
+
+  OPT_STATE.expandedClasses = OPT_STATE.expandedClasses || {};
+  OPT_STATE.expandedClasses[violation.cls] = true;
+  var $panel = $('#optBerthTableWrap .opt-berth-cls-panel').filter(function () {
+    return String($(this).attr('data-class') || '').toUpperCase() === String(violation.cls).toUpperCase();
+  });
+  if ($panel.length) {
+    $panel.find('.opt-berth-cls-body').show();
+    $panel.find('.opt-berth-cls-chevron').removeClass('fa-chevron-right').addClass('fa-chevron-down');
+  }
+
+  highlightRouteSegment(violation.from, violation.to);
+
+  var hint = 'Overlaps capacity violation ' + violation.from + ' \u2192 ' + violation.to
+    + (violation.excess != null ? ' (excess ' + violation.excess + ')' : '')
+    + ' — reduce these quota-berths';
+  var firstCard = null;
+  var hitCount = 0;
+
+  $('#optBerthTableWrap .opt-alloc-card').each(function () {
+    var $card = $(this);
+    if ($card.attr('data-removed') === '1') {
+      return;
+    }
+    var cls = String($card.attr('data-class') || '').trim();
+    if (cls.toUpperCase() !== String(violation.cls).toUpperCase()) {
+      return;
+    }
+    var from = String($card.find('.opt-edit-from').val() || $card.attr('data-from') || '').trim();
+    var to = String($card.find('.opt-edit-to').val() || $card.attr('data-to') || '').trim();
+    if (!from || !to || !allocationCoversSegment(from, to, violation.from, violation.to)) {
+      return;
+    }
+    hitCount += 1;
+    $card.addClass('opt-alloc-capacity-hit opt-alloc-focus').attr('title', hint);
+    $card.find('.opt-alloc-capacity-hint').remove();
+    $card.find('.opt-alloc-footer').prepend(
+      '<div class="opt-alloc-capacity-hint"><i class="fa fa-exclamation-circle"></i> ' + optEsc(hint) + '</div>'
+    );
+    if (!firstCard) {
+      firstCard = $card;
+    }
+  });
+
+  if (firstCard && firstCard.length && firstCard.offset()) {
+    $('html, body').animate({ scrollTop: firstCard.offset().top - 140 }, 280);
+  }
+  return hitCount;
+}
+
+function highlightCapacityViolationFromMessage(message) {
+  var violation = parseCapacityViolation(message);
+  if (!violation) {
+    clearCapacityViolationHighlights();
+    return null;
+  }
+  // Defer so we run after setOptimizationEditMode / any sync that finishes in the same turn.
+  OPT_STATE.capacityViolation = violation;
+  window.setTimeout(function () {
+    if (!OPT_STATE.capacityViolation) {
+      return;
+    }
+    applyCapacityViolationHighlights(OPT_STATE.capacityViolation);
+  }, 0);
+  return violation;
 }
 
 function extractOptimizationApiError(payload) {
@@ -1629,9 +2298,11 @@ function showOptimizationApiError(message, opts) {
         el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       }
     } catch (eScroll) { /* ignore */ }
+    highlightCapacityViolationFromMessage(detail);
     updateReoptimizeButton();
     return;
   }
+  clearCapacityViolationHighlights();
   $('#optimizationContent').html(
     '<div class="alert alert-info text-center opt-api-empty-state">'
     + '<div class="opt-api-error-title"><i class="fa fa-inbox"></i> ' + optEsc(title) + '</div>'
@@ -1700,6 +2371,7 @@ function captureExpandedClassPanels() {
 }
 
 function markOptimizationDirty() {
+  clearCapacityViolationHighlights();
   OPT_STATE.hasChanges = getChangeCounts().total > 0;
   updateReoptimizeButton();
 }
@@ -1783,7 +2455,7 @@ function buildCumulativeReoptimizeDelta(rows) {
   var sessionDelta = computeAllocationDelta(rows);
   var sessionBerths = sessionDelta.edited_berths || {};
   var sessionRemote = computeRemoteDelta();
-  var sessionCoaches = computeCoachDelta().edited_coaches || {};
+  var composition = buildFullCompositionPayload();
 
   var editedBerths = Object.assign({}, OPT_STATE.persistedEditedBerths || {});
   Object.keys(sessionBerths).forEach(function (key) {
@@ -1797,16 +2469,6 @@ function buildCumulativeReoptimizeDelta(rows) {
   Object.keys(sessionBerths).forEach(function (key) {
     if (optNum(sessionBerths[key]) === optNum(OPT_STATE.originalBerths[key])) {
       delete editedBerths[key];
-    }
-  });
-
-  var editedCoaches = Object.assign({}, OPT_STATE.persistedEditedCoaches || {});
-  Object.keys(sessionCoaches).forEach(function (cls) {
-    editedCoaches[cls] = sessionCoaches[cls];
-  });
-  Object.keys(sessionCoaches).forEach(function (cls) {
-    if (optNum(sessionCoaches[cls]) === optNum((OPT_STATE.originalCoaches || {})[cls])) {
-      delete editedCoaches[cls];
     }
   });
 
@@ -1830,7 +2492,8 @@ function buildCumulativeReoptimizeDelta(rows) {
 
   return {
     edited_berths: editedBerths,
-    edited_coaches: editedCoaches,
+    edited_coaches: composition.edited_coaches,
+    edited_phy_berths: composition.edited_phy_berths,
     remote_added: added,
     remote_removed: removed
   };
@@ -1839,6 +2502,8 @@ function buildCumulativeReoptimizeDelta(rows) {
 function persistReoptimizeDelta(delta) {
   OPT_STATE.persistedEditedBerths = Object.assign({}, (delta && delta.edited_berths) || {});
   OPT_STATE.persistedEditedCoaches = Object.assign({}, (delta && delta.edited_coaches) || {});
+  OPT_STATE.persistedEditedBerthComp = {};
+  OPT_STATE.persistedEditedPhyBerths = Object.assign({}, (delta && delta.edited_phy_berths) || {});
   OPT_STATE.persistedRemoteAdded = ensureUniqueCodes((delta && delta.remote_added) || []);
   OPT_STATE.persistedRemoteRemoved = ensureUniqueCodes((delta && delta.remote_removed) || []);
 }
@@ -1880,15 +2545,19 @@ function getRemoteChangeCount() {
 }
 
 function getPendingCoachChangeCount() {
-  var edited = OPT_STATE.editedCoaches || {};
-  var original = OPT_STATE.originalCoaches || {};
-  var count = 0;
-  Object.keys(edited).forEach(function (cls) {
-    if (optNum(edited[cls]) !== optNum(original[cls])) {
-      count += 1;
-    }
-  });
-  return count;
+  var delta = computeCoachDelta();
+  return Object.keys(delta.edited_coaches || {}).length;
+}
+
+/**
+ * ✕ on an allocation whose 0 is already carried in the persisted constraints drops that key
+ * from the next request, so it is a pending change even though the card is gone.
+ */
+function getDismissedConstraintCount() {
+  var persisted = OPT_STATE.persistedEditedBerths || {};
+  return (OPT_STATE.deletedKeys || []).filter(function (key) {
+    return key && persisted[key] !== undefined;
+  }).length;
 }
 
 function getChangeCounts() {
@@ -1897,13 +2566,15 @@ function getChangeCounts() {
   var modifiedCount = rows.filter(function (r) { return !r.isNew && !r.removed && isRowModified(r); }).length;
   // Only visible removed placeholders count — ✕ dismiss means "pass nothing", so not a pending API delete.
   var deletedCount = rows.filter(function (r) { return r.removed && !r.comparisonApplied; }).length;
+  var dismissedCount = getDismissedConstraintCount();
   var remoteChanges = getPendingRemoteChangeCount();
   var coachChanges = getPendingCoachChangeCount();
   return {
-    total: newCount + modifiedCount + deletedCount + remoteChanges + coachChanges,
+    total: newCount + modifiedCount + deletedCount + dismissedCount + remoteChanges + coachChanges,
     newCount: newCount,
     modifiedCount: modifiedCount,
     deleted: deletedCount,
+    dismissed: dismissedCount,
     remoteChanges: remoteChanges,
     coachChanges: coachChanges
   };
@@ -2198,6 +2869,15 @@ function getOptClassOptions() {
       classes.push(r.CLASS);
     }
   });
+  // A coach type added to the composition can carry allocations even though it has no berths yet.
+  // Mixed coaches contribute each of their classes, never the "1A+2A" unit key itself.
+  (OPT_STATE.compositionClasses || []).forEach(function (unit) {
+    splitCompositionUnit(unit).forEach(function (cls) {
+      if (cls && classes.indexOf(cls) === -1) {
+        classes.push(cls);
+      }
+    });
+  });
   return classes.sort();
 }
 
@@ -2215,31 +2895,243 @@ function getPhysicalRowField(row, keys) {
 }
 
 function getPhysicalCoachCount(row) {
-  return optNum(getPhysicalRowField(row, ['COACH', 'COACHES', 'NUM_COACH', 'coach', 'coaches']));
+  return optNum(getPhysicalRowField(row, ['NUM_COACHES', 'COACH', 'COACHES', 'NUM_COACH', 'coach', 'coaches']));
 }
 
 function getPhysicalBerthCount(row) {
   return optNum(getPhysicalRowField(row, ['PHY_BERTHS', 'PHYSICAL_BERTHS', 'phy_berths']));
 }
 
+/**
+ * A composition unit is one coach type. It is usually a single class ("3A" / "72"), but a mixed
+ * coach carries several classes in one shell ("1A+2A" / "10+20" = 10 berths of 1A and 20 of 2A).
+ *
+ * Identity key for multiple compositions of the same class:
+ *   "1A+2A|10+20"  → coach type "1A+2A", berth composition "10+20"
+ * Payload edited_coaches uses these keys; berth composition is encoded in the key (no separate map).
+ */
+function normalizeCompText(value) {
+  return String(value == null ? '' : value).replace(/\s+/g, '');
+}
+
+function makeCompositionKey(unit, comp) {
+  unit = normalizeCompText(unit);
+  comp = normalizeCompText(comp);
+  if (!unit) {
+    return '';
+  }
+  return comp ? (unit + '|' + comp) : unit;
+}
+
+function parseCompositionKey(key) {
+  key = normalizeCompText(key);
+  if (!key) {
+    return { unit: '', comp: '' };
+  }
+  var pipe = key.indexOf('|');
+  if (pipe < 0) {
+    return { unit: key, comp: '' };
+  }
+  return {
+    unit: key.substring(0, pipe),
+    comp: key.substring(pipe + 1)
+  };
+}
+
+function getCompositionUnit(key) {
+  return parseCompositionKey(key).unit;
+}
+
+function getCompositionCompFromKey(key) {
+  return parseCompositionKey(key).comp;
+}
+
+function splitCompositionUnit(unitOrKey) {
+  return splitCompositionUnitParts(getCompositionUnit(unitOrKey) || normalizeCompText(unitOrKey));
+}
+
+function splitCompositionUnitParts(unit) {
+  return normalizeCompText(unit).split('+').filter(function (part) { return part !== ''; });
+}
+
+function parseBerthCompParts(comp) {
+  return splitCompositionUnitParts(comp).map(optNum);
+}
+
+function sumBerthComp(comp) {
+  return parseBerthCompParts(comp).reduce(function (a, b) { return a + b; }, 0);
+}
+
+function isCompositeUnit(unitOrKey) {
+  return splitCompositionUnit(unitOrKey).length > 1;
+}
+
+/** A composition is usable for a unit only when it gives one berth count per class in the unit. */
+function isCompShapeValid(unitOrKey, comp) {
+  var unit = getCompositionUnit(unitOrKey) || normalizeCompText(unitOrKey);
+  return sumBerthComp(comp) > 0 && parseBerthCompParts(comp).length === splitCompositionUnitParts(unit).length;
+}
+
+function getPhysicalBerthComp(row) {
+  return normalizeCompText(getPhysicalRowField(row, ['BERTH_COMP', 'berth_comp']));
+}
+
+/**
+ * Build coach maps keyed by "CLS|BERTH_COMP" so the same class can appear with multiple compositions.
+ * Legacy keys without "|" are upgraded when a berth composition is known.
+ */
 function buildCoachMapsFromProfile(physicalRows) {
   var coaches = {};
   var phyBerths = {};
+  var berthComp = {};
   (physicalRows || []).forEach(function (row) {
-    var cls = getPhysicalRowField(row, ['CLS', 'CLASS', 'cls', 'class']);
-    if (!cls) {
+    var unit = normalizeCompText(getPhysicalRowField(row, ['CLS', 'CLASS', 'cls', 'class']));
+    if (!unit) {
       return;
     }
-    coaches[cls] = getPhysicalCoachCount(row);
-    phyBerths[cls] = getPhysicalBerthCount(row);
+    var count = getPhysicalCoachCount(row);
+    var phy = getPhysicalBerthCount(row);
+    var comp = getPhysicalBerthComp(row);
+    // Older payloads only carry PHY_BERTHS — derive berths per coach for plain single-class units.
+    if (!isCompShapeValid(unit, comp) && !isCompositeUnit(unit) && count > 0 && phy > 0) {
+      comp = String(Math.round(phy / count));
+    }
+    var key = makeCompositionKey(unit, comp);
+    if (!key) {
+      return;
+    }
+    coaches[key] = optNum(coaches[key]) + count;
+    phyBerths[key] = optNum(phyBerths[key]) + phy;
+    berthComp[key] = comp;
   });
-  return { coaches: coaches, phyBerths: phyBerths };
+  return { coaches: coaches, phyBerths: phyBerths, berthComp: berthComp };
+}
+
+/** Upgrade legacy "CLS" keys (and optional separate berth_comp map) to "CLS|COMP". */
+function migrateCompositionKeyMaps(coachesMap, berthCompMap) {
+  var coaches = {};
+  var berthComp = {};
+  Object.keys(coachesMap || {}).forEach(function (rawKey) {
+    var parsed = parseCompositionKey(rawKey);
+    var unit = parsed.unit;
+    var comp = parsed.comp
+      || normalizeCompText((berthCompMap || {})[rawKey])
+      || normalizeCompText((berthCompMap || {})[unit])
+      || '';
+    var key = makeCompositionKey(unit, comp);
+    if (!key) {
+      return;
+    }
+    coaches[key] = optNum(coaches[key]) + optNum(coachesMap[rawKey]);
+    if (comp) {
+      berthComp[key] = comp;
+    }
+  });
+  Object.keys(berthCompMap || {}).forEach(function (rawKey) {
+    var parsed = parseCompositionKey(rawKey);
+    var unit = parsed.unit;
+    var comp = parsed.comp || normalizeCompText(berthCompMap[rawKey]);
+    var key = makeCompositionKey(unit, comp);
+    if (!key || coaches[key] != null) {
+      if (key && comp) {
+        berthComp[key] = comp;
+      }
+      return;
+    }
+    // Comp-only legacy entry with no coach count yet.
+    coaches[key] = 0;
+    berthComp[key] = comp;
+  });
+  return { coaches: coaches, berthComp: berthComp };
+}
+
+function getBerthCompOptions(keyOrUnit) {
+  var unit = getCompositionUnit(keyOrUnit) || normalizeCompText(keyOrUnit);
+  var currentKey = normalizeCompText(keyOrUnit);
+  var currentComp = getCompositionCompFromKey(currentKey) || getBerthComp(currentKey);
+  var options = [];
+  var push = function (comp) {
+    comp = normalizeCompText(comp);
+    if (!isCompShapeValid(unit, comp)) {
+      return;
+    }
+    var candidateKey = makeCompositionKey(unit, comp);
+    // Keep current selection; hide comps already used by another row of the same class.
+    if (candidateKey !== currentKey && getCompositionClasses().indexOf(candidateKey) !== -1) {
+      return;
+    }
+    if (options.indexOf(comp) === -1) {
+      options.push(comp);
+    }
+  };
+  ((CURRENT_PROFILE && CURRENT_PROFILE.class_berth_comp) || []).forEach(function (row) {
+    if (normalizeCompText(row && row.CLS) === unit) {
+      push(row.BERTH_COMP);
+    }
+  });
+  push((OPT_STATE.originalBerthComp || {})[currentKey]);
+  push(currentComp);
+  return options.sort(function (a, b) { return sumBerthComp(a) - sumBerthComp(b); });
+}
+
+/** Unused (unit, comp) pairs from class_berth_comp — same class allowed with a different composition. */
+function getAddableCompositionEntries() {
+  var shown = getCompositionClasses();
+  var out = [];
+  var seen = {};
+  ((CURRENT_PROFILE && CURRENT_PROFILE.class_berth_comp) || []).forEach(function (row) {
+    var unit = normalizeCompText(row && row.CLS);
+    var comp = normalizeCompText(row && row.BERTH_COMP);
+    if (!unit || !isCompShapeValid(unit, comp)) {
+      return;
+    }
+    var key = makeCompositionKey(unit, comp);
+    if (shown.indexOf(key) !== -1 || seen[key]) {
+      return;
+    }
+    seen[key] = true;
+    out.push({ key: key, unit: unit, comp: comp, label: unit + ' \u00b7 ' + comp });
+  });
+  return out.sort(function (a, b) {
+    if (a.unit === b.unit) {
+      return sumBerthComp(a.comp) - sumBerthComp(b.comp);
+    }
+    return a.unit < b.unit ? -1 : 1;
+  });
+}
+
+function getAddableCompositionClasses() {
+  return getAddableCompositionEntries().map(function (entry) { return entry.unit; });
+}
+
+function getCompositionClasses() {
+  return OPT_STATE.compositionClasses || [];
+}
+
+function trackCompositionClass(cls) {
+  cls = normalizeCompText(cls);
+  if (!cls) {
+    return;
+  }
+  OPT_STATE.compositionClasses = OPT_STATE.compositionClasses || [];
+  if (OPT_STATE.compositionClasses.indexOf(cls) === -1) {
+    OPT_STATE.compositionClasses.push(cls);
+  }
 }
 
 function restoreCoachesFromPersisted() {
+  var migrated = migrateCompositionKeyMaps(
+    OPT_STATE.persistedEditedCoaches || {},
+    OPT_STATE.persistedEditedBerthComp || {}
+  );
   OPT_STATE.editedCoaches = OPT_STATE.editedCoaches || {};
-  Object.keys(OPT_STATE.persistedEditedCoaches || {}).forEach(function (cls) {
-    OPT_STATE.editedCoaches[cls] = optNum(OPT_STATE.persistedEditedCoaches[cls]);
+  OPT_STATE.editedBerthComp = OPT_STATE.editedBerthComp || {};
+  Object.keys(migrated.coaches).forEach(function (key) {
+    OPT_STATE.editedCoaches[key] = optNum(migrated.coaches[key]);
+    if (migrated.berthComp[key]) {
+      OPT_STATE.editedBerthComp[key] = migrated.berthComp[key];
+    }
+    trackCompositionClass(key);
   });
 }
 
@@ -2247,10 +3139,19 @@ function ensureCoachStateInitialized() {
   if (OPT_STATE.coachesInitialized) {
     return;
   }
-  var built = buildCoachMapsFromProfile((CURRENT_PROFILE && CURRENT_PROFILE.physical) || []);
+  // physical_comp carries NUM_COACHES/BERTH_COMP; physical only has PHY_BERTHS.
+  var source = (CURRENT_PROFILE && (CURRENT_PROFILE.physical_comp || CURRENT_PROFILE.physical)) || [];
+  var built = buildCoachMapsFromProfile(source);
+  OPT_STATE.profileCoaches = Object.assign({}, built.coaches);
+  OPT_STATE.profilePhyBerths = Object.assign({}, built.phyBerths);
+  OPT_STATE.profileBerthComp = Object.assign({}, built.berthComp);
   OPT_STATE.originalCoaches = Object.assign({}, built.coaches);
   OPT_STATE.originalPhyBerths = Object.assign({}, built.phyBerths);
+  OPT_STATE.originalBerthComp = Object.assign({}, built.berthComp);
   OPT_STATE.editedCoaches = Object.assign({}, built.coaches);
+  OPT_STATE.editedBerthComp = Object.assign({}, built.berthComp);
+  OPT_STATE.compositionClasses = Object.keys(built.coaches).sort();
+  OPT_STATE.addedClasses = [];
   restoreCoachesFromPersisted();
   OPT_STATE.coachesInitialized = true;
 }
@@ -2263,10 +3164,27 @@ function syncCoachBaselineAfterOptimize() {
   });
   OPT_STATE.originalCoaches = orig;
   OPT_STATE.persistedEditedCoaches = {};
+
+  var editedComp = OPT_STATE.editedBerthComp || {};
+  var origComp = Object.assign({}, OPT_STATE.originalBerthComp || {});
+  Object.keys(editedComp).forEach(function (cls) {
+    origComp[cls] = normalizeCompText(editedComp[cls]);
+  });
+  // Keep key→comp in sync with composite keys.
+  Object.keys(edited).forEach(function (key) {
+    var comp = getCompositionCompFromKey(key) || normalizeCompText(editedComp[key]);
+    if (comp) {
+      origComp[key] = comp;
+    }
+  });
+  OPT_STATE.originalBerthComp = origComp;
+  OPT_STATE.persistedEditedBerthComp = {};
+  // Applied classes are part of the baseline now, so they can no longer be discarded.
+  OPT_STATE.addedClasses = [];
 }
 
 function getCoachCount(cls) {
-  cls = String(cls || '').trim();
+  cls = normalizeCompText(cls);
   if (!cls) {
     return 0;
   }
@@ -2277,94 +3195,523 @@ function getCoachCount(cls) {
 }
 
 function getPhyBerthCount(cls) {
-  cls = String(cls || '').trim();
+  cls = normalizeCompText(cls);
   return optNum((OPT_STATE.originalPhyBerths || {})[cls]);
 }
 
-function isCoachModified(cls) {
-  return optNum(getCoachCount(cls)) !== optNum((OPT_STATE.originalCoaches || {})[cls]);
+function getBerthComp(key) {
+  key = normalizeCompText(key);
+  if (!key) {
+    return '';
+  }
+  var fromKey = getCompositionCompFromKey(key);
+  if (fromKey) {
+    return fromKey;
+  }
+  if (OPT_STATE.editedBerthComp && OPT_STATE.editedBerthComp[key] != null) {
+    return normalizeCompText(OPT_STATE.editedBerthComp[key]);
+  }
+  return normalizeCompText((OPT_STATE.originalBerthComp || {})[key]);
 }
 
+/** Capacity of one coach type: every berth in the shell, mixed classes summed together. */
+function getEffectivePhyBerths(key) {
+  var comp = getBerthComp(key);
+  if (sumBerthComp(comp) > 0) {
+    return sumBerthComp(comp) * optNum(getCoachCount(key));
+  }
+  return getPhyBerthCount(key);
+}
+
+/**
+ * Berths a unit contributes to each real class, e.g. two "1A+2A|10+20" coaches give
+ * { '1A': 20, '2A': 40 }. Returns null when the composition does not match the unit's shape.
+ */
+function getUnitBerthsByClass(key) {
+  var unit = getCompositionUnit(key);
+  var classes = splitCompositionUnitParts(unit);
+  var parts = parseBerthCompParts(getBerthComp(key));
+  if (!classes.length || parts.length !== classes.length) {
+    return null;
+  }
+  var coaches = optNum(getCoachCount(key));
+  var out = {};
+  classes.forEach(function (cls, i) {
+    out[cls] = optNum(out[cls]) + parts[i] * coaches;
+  });
+  return out;
+}
+
+/** Total berths per real class across every unit — a class can sit in both a solo and a mixed coach. */
+function getEffectiveBerthsByClass() {
+  var out = {};
+  getCompositionClasses().forEach(function (key) {
+    var byClass = getUnitBerthsByClass(key);
+    if (!byClass) {
+      return;
+    }
+    Object.keys(byClass).forEach(function (cls) {
+      out[cls] = optNum(out[cls]) + byClass[cls];
+    });
+  });
+  return out;
+}
+
+/**
+ * Class capacity from edited_coaches keys like "1A|24": 1 or "1A+2A|10+20": 2.
+ * Capacity(class) = sum(berths_per_coach_for_class × coach_count).
+ */
+function classCapacityFromEditedCoaches(editedCoaches) {
+  var out = {};
+  Object.keys(editedCoaches || {}).forEach(function (key) {
+    var coaches = optNum(editedCoaches[key]);
+    if (coaches <= 0) {
+      return;
+    }
+    var parsed = parseCompositionKey(key);
+    var classes = splitCompositionUnitParts(parsed.unit);
+    var parts = parseBerthCompParts(parsed.comp);
+    if (!classes.length) {
+      return;
+    }
+    if (classes.length === 1) {
+      var perCoach = parts.length ? parts[0] : 0;
+      out[classes[0]] = optNum(out[classes[0]]) + perCoach * coaches;
+      return;
+    }
+    classes.forEach(function (cls, i) {
+      out[cls] = optNum(out[cls]) + optNum(parts[i]) * coaches;
+    });
+  });
+  return out;
+}
+
+/** Prefer API capacity maps; fall back to deriving from edited_coaches / current UI composition. */
+function extractClassCapacityFromOptimizeData(data) {
+  data = data || {};
+  var sources = [
+    data.optimizer_result,
+    data.optimized_analysis,
+    data.current_analysis,
+    data
+  ];
+  var i;
+  for (i = 0; i < sources.length; i++) {
+    var src = sources[i];
+    if (!src || typeof src !== 'object') {
+      continue;
+    }
+    var direct = src.class_capacity || src.Class_capacity || src.Berth_capacity
+      || src.berth_capacity || src.capacity || src.edited_phy_berths;
+    if (direct && typeof direct === 'object' && !Array.isArray(direct) && Object.keys(direct).length) {
+      var fromDirect = {};
+      Object.keys(direct).forEach(function (cls) {
+        fromDirect[cls] = optNum(direct[cls]);
+      });
+      return fromDirect;
+    }
+    if (src.edited_coaches && typeof src.edited_coaches === 'object') {
+      var fromCoaches = classCapacityFromEditedCoaches(src.edited_coaches);
+      if (Object.keys(fromCoaches).length) {
+        return fromCoaches;
+      }
+    }
+  }
+  try {
+    var composition = buildFullCompositionPayload();
+    if (composition && composition.edited_phy_berths) {
+      return Object.assign({}, composition.edited_phy_berths);
+    }
+  } catch (e) { /* ignore */ }
+  return Object.assign({}, getEffectiveBerthsByClass());
+}
+
+function getClassCapacityForPdf() {
+  var capacity = OPT_STATE.classCapacity;
+  if (capacity && Object.keys(capacity).length) {
+    return capacity;
+  }
+  try {
+    var composition = buildFullCompositionPayload();
+    if (composition && composition.edited_phy_berths) {
+      return Object.assign({}, composition.edited_phy_berths);
+    }
+  } catch (e) { /* ignore */ }
+  return Object.assign({}, getEffectiveBerthsByClass());
+}
+
+function isCoachModified(unit) {
+  return optNum(getCoachCount(unit)) !== optNum((OPT_STATE.originalCoaches || {})[unit]);
+}
+
+function isBerthCompModified(unit) {
+  return getBerthComp(unit) !== normalizeCompText((OPT_STATE.originalBerthComp || {})[unit]
+    || getCompositionCompFromKey(unit));
+}
+
+/**
+ * Pending coach deltas (for Re-Optimize change counts only).
+ * Request payload uses buildFullCompositionPayload with composite keys.
+ */
 function computeCoachDelta() {
   var edited = OPT_STATE.editedCoaches || {};
   var original = OPT_STATE.originalCoaches || {};
   var out = {};
-  Object.keys(edited).forEach(function (cls) {
-    if (optNum(edited[cls]) !== optNum(original[cls])) {
-      out[cls] = optNum(edited[cls]);
+  Object.keys(edited).forEach(function (unit) {
+    if (optNum(edited[unit]) !== optNum(original[unit])) {
+      out[unit] = optNum(edited[unit]);
     }
   });
-  return { edited_coaches: out };
+  Object.keys(original).forEach(function (unit) {
+    if (edited[unit] == null && optNum(original[unit]) !== 0) {
+      out[unit] = 0;
+    }
+  });
+
+  var byClass = getEffectiveBerthsByClass();
+  var outBerths = {};
+  Object.keys(out).forEach(function (key) {
+    splitCompositionUnit(key).forEach(function (cls) {
+      outBerths[cls] = optNum(byClass[cls]);
+    });
+  });
+  return { edited_coaches: out, edited_phy_berths: outBerths };
 }
 
-function adjustCoachCount(cls, delta) {
-  cls = String(cls || '').trim();
-  if (!cls || OPT_STATE.reoptimizing) {
+/** Full current composition — edited_coaches keys are "CLS|BERTH_COMP". */
+function buildFullCompositionPayload() {
+  ensureCoachStateInitialized();
+  var edited_coaches = {};
+  var units = {};
+  getCompositionClasses().forEach(function (key) { units[key] = true; });
+  Object.keys(OPT_STATE.profileCoaches || {}).forEach(function (key) { units[key] = true; });
+
+  Object.keys(units).forEach(function (key) {
+    key = normalizeCompText(key);
+    if (!key) {
+      return;
+    }
+    var unit = getCompositionUnit(key);
+    var comp = getBerthComp(key);
+    if (!comp && OPT_STATE.profileBerthComp && OPT_STATE.profileBerthComp[key]) {
+      comp = normalizeCompText(OPT_STATE.profileBerthComp[key]);
+    }
+    var compositeKey = makeCompositionKey(unit, comp);
+    if (!compositeKey) {
+      return;
+    }
+    trackCompositionClass(compositeKey);
+    edited_coaches[compositeKey] = optNum(getCoachCount(key));
+  });
+
+  var edited_phy_berths = Object.assign({}, getEffectiveBerthsByClass());
+  Object.keys(edited_coaches).forEach(function (key) {
+    splitCompositionUnit(key).forEach(function (cls) {
+      if (edited_phy_berths[cls] == null) {
+        edited_phy_berths[cls] = 0;
+      }
+    });
+  });
+
+  return {
+    edited_coaches: edited_coaches,
+    edited_phy_berths: edited_phy_berths
+  };
+}
+
+function getTotalCoachCount(excludeUnit) {
+  excludeUnit = normalizeCompText(excludeUnit || '');
+  return getCompositionClasses().reduce(function (sum, unit) {
+    if (excludeUnit && unit === excludeUnit) {
+      return sum;
+    }
+    return sum + optNum(getCoachCount(unit));
+  }, 0);
+}
+
+/** Total / added / removed vs CURRENT_PROFILE — for composition summary UI (no max limit shown). */
+function getCoachChangeSummary() {
+  ensureCoachStateInitialized();
+  var units = {};
+  getCompositionClasses().forEach(function (key) { units[key] = true; });
+  Object.keys(OPT_STATE.profileCoaches || {}).forEach(function (key) { units[key] = true; });
+  var total = 0;
+  var added = 0;
+  var removed = 0;
+  Object.keys(units).forEach(function (key) {
+    key = normalizeCompText(key);
+    if (!key) {
+      return;
+    }
+    var current = optNum(getCoachCount(key));
+    var profile = optNum((OPT_STATE.profileCoaches || {})[key]);
+    total += current;
+    var delta = current - profile;
+    if (delta > 0) {
+      added += delta;
+    } else if (delta < 0) {
+      removed += -delta;
+    }
+  });
+  return { total: total, added: added, removed: removed };
+}
+
+function getMaxCoachesForUnit(unit) {
+  return Math.max(0, OPT_MAX_COACHES_TOTAL - getTotalCoachCount(unit));
+}
+
+function isProfileCompositionUnit(unit) {
+  unit = normalizeCompText(unit);
+  return !!(OPT_STATE.profileCoaches && Object.prototype.hasOwnProperty.call(OPT_STATE.profileCoaches, unit));
+}
+
+function isCompositionModifiedVsProfile(unit) {
+  unit = normalizeCompText(unit);
+  var profileCount = optNum((OPT_STATE.profileCoaches || {})[unit]);
+  return optNum(getCoachCount(unit)) !== profileCount;
+}
+
+/** Added / Modified / Removed vs CURRENT_PROFILE composition (composite keys). */
+function getCompositionChangeTag(unit) {
+  unit = normalizeCompText(unit);
+  var inProfile = isProfileCompositionUnit(unit);
+  var coaches = optNum(getCoachCount(unit));
+  var isAdded = (OPT_STATE.addedClasses || []).indexOf(unit) !== -1 || !inProfile;
+  if (isAdded) {
+    return 'Added';
+  }
+  if (inProfile && coaches <= 0) {
+    return 'Removed';
+  }
+  if (inProfile && isCompositionModifiedVsProfile(unit)) {
+    return 'Modified';
+  }
+  return '';
+}
+
+function setCoachCount(unit, value) {
+  unit = normalizeCompText(unit);
+  if (!unit || OPT_STATE.reoptimizing) {
     return;
   }
   ensureCoachStateInitialized();
-  var next = Math.max(0, optNum(getCoachCount(cls)) + optNum(delta));
+  var maxForUnit = getMaxCoachesForUnit(unit);
+  var next = Math.min(maxForUnit, Math.max(0, optNum(value)));
   OPT_STATE.editedCoaches = OPT_STATE.editedCoaches || {};
-  OPT_STATE.editedCoaches[cls] = next;
+  OPT_STATE.editedCoaches[unit] = next;
   markOptimizationDirty();
   refreshCoachCompositionSection();
   updateReoptimizeButton();
 }
 
+function adjustCoachCount(unit, delta) {
+  setCoachCount(unit, optNum(getCoachCount(unit)) + optNum(delta));
+}
+
+/** Changing berth composition remaps the row to a new "CLS|COMP" key. */
+function setBerthComp(oldKey, comp) {
+  oldKey = normalizeCompText(oldKey);
+  comp = normalizeCompText(comp);
+  var unit = getCompositionUnit(oldKey);
+  if (!oldKey || !unit || !isCompShapeValid(unit, comp) || OPT_STATE.reoptimizing) {
+    return;
+  }
+  ensureCoachStateInitialized();
+  var newKey = makeCompositionKey(unit, comp);
+  if (!newKey || newKey === oldKey) {
+    return;
+  }
+  if (getCompositionClasses().indexOf(newKey) !== -1) {
+    alert('That composition for ' + unit + ' is already in the list.');
+    refreshCoachCompositionSection();
+    return;
+  }
+  var coaches = optNum(getCoachCount(oldKey));
+  OPT_STATE.editedCoaches = OPT_STATE.editedCoaches || {};
+  OPT_STATE.editedBerthComp = OPT_STATE.editedBerthComp || {};
+  OPT_STATE.editedCoaches[newKey] = coaches;
+  OPT_STATE.editedBerthComp[newKey] = comp;
+  delete OPT_STATE.editedCoaches[oldKey];
+  delete OPT_STATE.editedBerthComp[oldKey];
+  OPT_STATE.compositionClasses = getCompositionClasses().map(function (k) {
+    return k === oldKey ? newKey : k;
+  });
+  OPT_STATE.addedClasses = (OPT_STATE.addedClasses || []).map(function (k) {
+    return k === oldKey ? newKey : k;
+  });
+  if ((OPT_STATE.addedClasses || []).indexOf(oldKey) !== -1 && OPT_STATE.addedClasses.indexOf(newKey) === -1) {
+    OPT_STATE.addedClasses.push(newKey);
+  }
+  markOptimizationDirty();
+  refreshCoachCompositionSection();
+  updateReoptimizeButton();
+}
+
+/** Add a specific class+composition pair (same class allowed with a different berth composition). */
+function addCompositionClass(keyOrUnit) {
+  var raw = normalizeCompText(keyOrUnit);
+  if (!raw || OPT_STATE.reoptimizing) {
+    return;
+  }
+  ensureCoachStateInitialized();
+  var unit;
+  var comp;
+  var key;
+  if (raw.indexOf('|') >= 0) {
+    key = raw;
+    unit = getCompositionUnit(key);
+    comp = getCompositionCompFromKey(key);
+  } else {
+    unit = raw;
+    var unused = getAddableCompositionEntries().filter(function (e) { return e.unit === unit; });
+    if (!unused.length) {
+      return;
+    }
+    key = unused[0].key;
+    comp = unused[0].comp;
+  }
+  if (!key || !isCompShapeValid(unit, comp) || getCompositionClasses().indexOf(key) !== -1) {
+    return;
+  }
+  trackCompositionClass(key);
+  OPT_STATE.addedClasses = OPT_STATE.addedClasses || [];
+  if (OPT_STATE.addedClasses.indexOf(key) === -1) {
+    OPT_STATE.addedClasses.push(key);
+  }
+  OPT_STATE.editedCoaches = OPT_STATE.editedCoaches || {};
+  OPT_STATE.editedCoaches[key] = 0;
+  OPT_STATE.editedBerthComp = OPT_STATE.editedBerthComp || {};
+  OPT_STATE.editedBerthComp[key] = comp;
+  markOptimizationDirty();
+  refreshCoachCompositionSection();
+  updateReoptimizeButton();
+}
+
+/** Only coach types added in this pass can be discarded; applied ones are part of the baseline. */
+function removeCompositionClass(unit) {
+  unit = normalizeCompText(unit);
+  if (!unit || OPT_STATE.reoptimizing || (OPT_STATE.addedClasses || []).indexOf(unit) === -1) {
+    return;
+  }
+  OPT_STATE.addedClasses = OPT_STATE.addedClasses.filter(function (u) { return u !== unit; });
+  OPT_STATE.compositionClasses = getCompositionClasses().filter(function (u) { return u !== unit; });
+  delete (OPT_STATE.editedCoaches || {})[unit];
+  delete (OPT_STATE.editedBerthComp || {})[unit];
+  markOptimizationDirty();
+  refreshCoachCompositionSection();
+  updateReoptimizeButton();
+}
+
+function buildCoachCompositionRow(key) {
+  key = normalizeCompText(key);
+  var unit = getCompositionUnit(key);
+  var coaches = getCoachCount(key);
+  var comp = getBerthComp(key);
+  var phy = getEffectivePhyBerths(key);
+  var changeTag = getCompositionChangeTag(key);
+  var isAdded = changeTag === 'Added';
+  var isRemoved = changeTag === 'Removed';
+  var isModified = changeTag === 'Modified';
+  var disabled = OPT_STATE.reoptimizing ? ' disabled' : '';
+  var maxForUnit = getMaxCoachesForUnit(key);
+  var inputMax = Math.max(coaches, maxForUnit);
+  var atTrainLimit = getTotalCoachCount() >= OPT_MAX_COACHES_TOTAL;
+  var compOptions = getBerthCompOptions(key).map(function (value) {
+    return '<option value="' + optEsc(value) + '"' + (value === comp ? ' selected' : '') + '>' + optEsc(value) + '</option>';
+  }).join('');
+  var byClass = isCompositeUnit(unit) ? getUnitBerthsByClass(key) : null;
+  var split = byClass ? Object.keys(byClass).map(function (cls) {
+    return cls + ' ' + byClass[cls];
+  }).join(' \u00b7 ') : '';
+  var tagClass = isAdded ? 'opt-coach-tag-added'
+    : (isRemoved ? 'opt-coach-tag-removed'
+      : (isModified ? 'opt-coach-tag-modified' : ''));
+  var rowClass = 'opt-coach-row'
+    + (isAdded || isModified ? ' is-modified' : '')
+    + (isRemoved ? ' is-removed' : '');
+  return '<div class="' + rowClass + '" data-class="' + optEsc(key) + '">'
+    + '<span class="opt-cls-badge ' + optClsBadge(unit) + '">' + optEsc(unit) + '</span>'
+    + '<select class="form-control opt-coach-comp" data-class="' + optEsc(key) + '"' + disabled
+    + ' title="Berths per coach">' + (compOptions || '<option value="">--</option>') + '</select>'
+    + '<span class="opt-coach-op">\u00d7</span>'
+    + '<button type="button" class="btn btn-default btn-xs opt-coach-minus" data-class="' + optEsc(key) + '"'
+    + (disabled || coaches <= 0 ? ' disabled' : '') + ' title="Remove one coach">\u2212</button>'
+    + '<input type="number" class="form-control opt-coach-count" data-class="' + optEsc(key) + '" value="' + coaches
+    + '" min="0" max="' + inputMax + '"' + disabled
+    + ' title="Coaches">'
+    + '<button type="button" class="btn btn-default btn-xs opt-coach-plus" data-class="' + optEsc(key) + '"'
+    + (disabled || coaches >= maxForUnit || atTrainLimit ? ' disabled' : '')
+    + ' title="Add one coach">+</button>'
+    + '<span class="opt-coach-op">=</span>'
+    + '<strong class="opt-coach-total">' + phy + '</strong>'
+    + (split ? '<span class="opt-coach-split">' + optEsc(split) + '</span>' : '')
+    + (changeTag ? '<span class="opt-coach-tag ' + tagClass + '">' + optEsc(changeTag) + '</span>' : '')
+    + (isAdded ? '<button type="button" class="btn btn-link btn-xs opt-coach-drop" data-class="' + optEsc(key) + '"'
+      + disabled + ' title="Discard this coach type">\u00d7</button>' : '')
+    + '</div>';
+}
+
 function buildCoachCompositionSection() {
   ensureCoachStateInitialized();
-  var classes = getOptClassOptions();
-  if (!classes.length) {
-    classes = Object.keys(OPT_STATE.originalCoaches || {}).sort();
-  }
+  var classes = getCompositionClasses();
   if (!classes.length) {
     return '';
   }
-  var cards = classes.map(function (cls) {
-    var coaches = getCoachCount(cls);
-    var phy = getPhyBerthCount(cls);
-    var orig = optNum((OPT_STATE.originalCoaches || {})[cls]);
-    var modified = isCoachModified(cls);
-    var delta = coaches - orig;
-    var deltaHtml = modified
-      ? '<span class="opt-coach-delta">was ' + orig + (delta > 0 ? ' · +' + delta : (delta < 0 ? ' · ' + delta : '')) + '</span>'
-      : '';
-    var disabled = OPT_STATE.reoptimizing ? ' disabled' : '';
-    return '<div class="opt-coach-card' + (modified ? ' is-modified' : '') + '" data-class="' + optEsc(cls) + '">'
-      + '<div class="opt-coach-card-head">'
-      + '<span class="opt-cls-badge ' + optClsBadge(cls) + '">' + optEsc(cls) + '</span>'
-      + (modified ? '<span class="opt-coach-badge">Coach changed</span>' : '')
-      + '</div>'
-      + '<div class="opt-coach-stats">'
-      + '<span class="opt-coach-stat"><span class="lbl">Physical berths</span><strong>' + phy + '</strong></span>'
-      + '<span class="opt-coach-stat"><span class="lbl">Coaches</span><strong class="opt-coach-value">' + coaches + '</strong></span>'
-      + '</div>'
-      + deltaHtml
-      + '<div class="opt-coach-stepper">'
-      + '<button type="button" class="btn btn-default btn-xs opt-coach-minus" data-class="' + optEsc(cls) + '"' + disabled + ' title="Remove one coach">−</button>'
-      + '<button type="button" class="btn btn-default btn-xs opt-coach-plus" data-class="' + optEsc(cls) + '"' + disabled + ' title="Add one coach">+</button>'
-      + '</div>'
-      + '</div>';
-  }).join('');
+  var totalCoaches = getTotalCoachCount();
+  var summary = getCoachChangeSummary();
+  var addable = getAddableCompositionEntries();
+  var addControl = '';
+  if (addable.length) {
+    addControl = '<select class="form-control opt-coach-add" id="optCoachAddClass"'
+      + (OPT_STATE.reoptimizing || totalCoaches >= OPT_MAX_COACHES_TOTAL ? ' disabled' : '')
+      + ' title="Add a class/composition (same class allowed with a different berth composition)">'
+      + '<option value="">+ Add class</option>'
+      + addable.map(function (entry) {
+        return '<option value="' + optEsc(entry.key) + '">' + optEsc(entry.label) + '</option>';
+      }).join('')
+      + '</select>';
+  }
+  var summaryHtml = '<div class="opt-coach-summary">'
+    + '<span class="opt-coach-summary-item">Total Coaches: <strong>' + summary.total + '</strong></span>'
+    + '<span class="opt-coach-summary-item opt-coach-summary-added">Added Coaches: <strong>+' + summary.added + '</strong></span>'
+    + '<span class="opt-coach-summary-item opt-coach-summary-removed">Removed Coaches: <strong>-' + summary.removed + '</strong></span>'
+    + '</div>';
   return '<div class="opt-coach-section" id="optCoachSection">'
-    + '<div class="opt-coach-head">'
-    + '<span class="opt-coach-title"><i class="fa fa-subway"></i> Train composition</span>'
-    + '<span class="opt-coach-hint">Adjust coaches per class · sent with Re-Optimize</span>'
+    + '<div class="opt-coach-rows">'
+    + '<span class="opt-coach-title"><i class="fa fa-subway"></i> Composition</span>'
+    + classes.map(buildCoachCompositionRow).join('')
+    + addControl
     + '</div>'
-    + '<div class="opt-coach-grid">' + cards + '</div>'
+    + summaryHtml
     + '</div>';
 }
 
 function refreshCoachCompositionSection() {
   var $section = $('#optCoachSection');
-  if (!$section.length) {
+  if ($section.length) {
+    $section.replaceWith(buildCoachCompositionSection());
     return;
   }
-  var $wrap = $section.closest('.opt-coach-section');
-  if ($wrap.length) {
-    $wrap.replaceWith(buildCoachCompositionSection());
-  }
+  renderPreOptimizeComposition();
 }
+
+function renderPreOptimizeComposition() {
+  var $wrap = $('#optPreCompositionWrap');
+  if (!$wrap.length) {
+    return;
+  }
+  if (!CURRENT_PROFILE) {
+    $wrap.html('').hide();
+    return;
+  }
+  var html = buildCoachCompositionSection();
+  if (!html) {
+    $wrap.html('').hide();
+    return;
+  }
+  $wrap.html(html).show();
+}
+window.renderPreOptimizeComposition = renderPreOptimizeComposition;
 
 function optSelectOptions(values, selected, placeholder, preserveOrder, titleFn) {
   var list = (values || []).slice();
@@ -2490,7 +3837,7 @@ function restoreSaveProfileButton($saveBtn, canSave, hasPendingChanges, labelHtm
   if (!OPT_STATE.optimizationLoaded) {
     title = 'Run Show Optimization before saving a profile';
   } else if (hasPendingChanges) {
-    title = 'Re-optimize pending changes before saving';
+    title = 'Re-Optimize your pending changes first — they cannot be saved unoptimized';
   } else if (!OPT_PROFILE.lastRequestPayload) {
     title = 'No optimization request is available to save';
   }
@@ -2507,9 +3854,9 @@ function updateReoptimizeButton() {
   var $saveAsNewBtn = $('#optSaveAsNewProfileBtn');
   var counts = getChangeCounts();
   var hasPendingChanges = counts.total > 0 && OPT_STATE.optimizationLoaded;
+  // Stays clickable while editing; saveOptimizationProfile() rejects unoptimized changes with a message.
   var canSave = OPT_STATE.optimizationLoaded
     && !!OPT_PROFILE.lastRequestPayload
-    && !hasPendingChanges
     && !OPT_STATE.reoptimizing;
   var isEdit = OPT_PROFILE.profileMode === 'EDIT';
 			   
@@ -2549,6 +3896,33 @@ function updateReoptimizeButton() {
     'Save the current work as the next profile id');
   $saveAsNewBtn.toggle(isEdit);
   updateChangeSummaryPanel();
+  updateOptProfileStatus();
+}
+
+function updateOptProfileStatus() {
+  var $wrap = $('#optProfileStatus');
+  if (!$wrap.length) {
+    return;
+  }
+  var profileId = String(OPT_PROFILE.selectedProfileId || '').trim();
+  var pending = OPT_STATE.optimizationLoaded && getChangeCounts().total > 0;
+  var stateCls = 'is-new';
+  var stateLabel = 'Not saved yet';
+  if (pending) {
+    stateCls = 'is-unsaved';
+    stateLabel = 'Unsaved changes';
+  } else if (OPT_PROFILE.profileSaved) {
+    stateCls = 'is-saved';
+    stateLabel = 'Saved';
+  }
+  $wrap.html(
+    '<span class="opt-profile-status-id">'
+    + (profileId
+      ? '<i class="fa fa-id-card-o"></i> Profile ' + optEsc(profileId)
+      : '<i class="fa fa-file-o"></i> New profile')
+    + '</span>'
+    + '<span class="opt-profile-status-state ' + stateCls + '">' + optEsc(stateLabel) + '</span>'
+  );
 }
 
 function updateChangeSummaryPanel() {
@@ -2567,7 +3941,7 @@ function updateChangeSummaryPanel() {
     + '<div class="opt-change-summary-item opt-summary-success"><span class="lbl">Added</span><strong>' + counts.newCount + '</strong></div>'
     + '<div class="opt-change-summary-item opt-summary-warning"><span class="lbl">Modified</span><strong>' + counts.modifiedCount + '</strong></div>'
     + '<div class="opt-change-summary-item opt-summary-warning"><span class="lbl">Coaches</span><strong>' + counts.coachChanges + '</strong></div>'
-    + '<div class="opt-change-summary-item opt-summary-danger"><span class="lbl">Removed</span><strong>' + counts.deleted + '</strong></div>'
+    + '<div class="opt-change-summary-item opt-summary-danger"><span class="lbl">Removed</span><strong>' + (counts.deleted + counts.dismissed) + '</strong></div>'
     + '<div class="opt-change-summary-item ' + netCls + '"><span class="lbl">Net Berth Change</span><strong>' + netLabel + '</strong></div>'
     + '</div>'
   );
@@ -2636,12 +4010,14 @@ function refreshAllocationCardStates() {
     var $badge = $card.find('.opt-alloc-badge');
     var changeLabel = getAllocationChangeLabel(row);
     if (removed) {
-      $badge.text(removedBerthLabel(row)).attr('data-change-type', 'removed').show();
+      $badge.text((row.comparisonApplied && row.comparisonLabel) ? row.comparisonLabel : removedBerthLabel(row))
+        .attr('data-change-type', 'removed').show();
       $card.find('.opt-edit-berths').val(0);
     } else if (isNew) {
-      $badge.text('New').attr('data-change-type', 'new').show();
+      $badge.text(row.comparisonLabel || 'New').attr('data-change-type', comparisonStatus || 'new').show();
     } else if (comparisonStatus) {
-      $badge.text(row.comparisonLabel || comparisonStatus).attr('data-change-type', comparisonStatus).show();
+      $badge.text(row.comparisonLabel || (comparisonStatus === 'modified' ? 'Modified' : comparisonStatus))
+        .attr('data-change-type', comparisonStatus).show();
     } else if (modified && changeLabel) {
       $badge.text(changeLabel).attr('data-change-type', 'modified').show();
     } else {
@@ -2766,7 +4142,7 @@ function focusNewAllocationCard() {
 
 function setOptimizationEditMode(busy) {
   OPT_STATE.reoptimizing = busy;
-  $('#optimizationContent').find('.opt-edit-quota, .opt-edit-from, .opt-edit-to, .opt-edit-berths, .opt-add-row, .opt-del-row, .opt-dismiss-row, .opt-berth-cls-head, #optReoptimizeBtn')
+  $('#optimizationContent').find('.opt-edit-quota, .opt-edit-from, .opt-edit-to, .opt-edit-berths, .opt-add-row, .opt-del-row, .opt-dismiss-row, .opt-berth-cls-head, .opt-coach-minus, .opt-coach-plus, .opt-coach-comp, .opt-coach-count, .opt-coach-drop, .opt-coach-add, #optReoptimizeBtn')
     .prop('disabled', busy);
   if (busy) {
     $('#optBerthExpandAll, #optBerthCollapseAll').addClass('disabled').css('pointer-events', 'none');
@@ -2827,6 +4203,11 @@ function copyAllocationRowsForComparison(rows) {
 
 function savedPayloadRowsForComparison(payload) {
   var body = toOptimizeRequestPayload(payload);
+  return editedBerthsMapToComparisonRows(body.edited_berths || {});
+}
+
+/** Build comparison rows for every key in an edited_berths map (vs CURRENT_PROFILE baseline). */
+function editedBerthsMapToComparisonRows(editedBerths) {
   var currentByKey = {};
   ((CURRENT_PROFILE && CURRENT_PROFILE.berths) || []).forEach(function (r) {
     var current = {
@@ -2839,18 +4220,21 @@ function savedPayloadRowsForComparison(payload) {
     currentByKey[rowToBerthKey(current)] = current;
   });
 
-  return Object.keys(body.edited_berths || {}).map(function (key) {
+  return Object.keys(editedBerths || {}).map(function (key) {
     var parsed = parseBerthKey(key);
     var original = currentByKey[key];
-    var modifiedBerths = optNum(body.edited_berths[key]);
+    var modifiedBerths = optNum(editedBerths[key]);
+    var intent = modifiedBerths === 0 ? 'removed'
+      : (!original ? 'added' : 'modified');
     return {
       CLASS: parsed.cls,
       QUOTA: parsed.quota,
       FROM: parsed.from,
       TO: parsed.to,
       BERTHS: modifiedBerths,
-      isNew: !original && modifiedBerths > 0,
-      removed: modifiedBerths === 0,
+      isNew: intent === 'added',
+      removed: intent === 'removed',
+      comparisonIntent: intent,
       origKey: key,
       removedBerthsOrig: original ? original.BERTHS : 0,
       origSnapshot: original ? {
@@ -2870,16 +4254,27 @@ function applySuccessfulReoptimizeComparison(requestedRows) {
   });
 
   (requestedRows || []).forEach(function (requested) {
-    var status = requested.removed ? 'removed'
-      : (requested.isNew ? 'added' : (isRowModified(requested) ? 'modified' : ''));
+    var status = requested.comparisonIntent
+      || (requested.removed ? 'removed'
+        : (requested.isNew ? 'added' : (isRowModified(requested) ? 'modified' : '')));
     if (!status) {
       return;
     }
 
     var key = status === 'removed'
       ? (requested.origKey || rowToBerthKey(requested))
-      : rowToBerthKey(requested);
+      : (requested.origKey || rowToBerthKey(requested));
     var target = responseByKey[key];
+    if (!target) {
+      // Match by CLASS/QUOTA/FROM/TO if key casing or formatting drifts.
+      target = (OPT_STATE.editedRows || []).find(function (r) {
+        return rowToBerthKey(r) === key
+          || (String(r.CLASS) === String(requested.CLASS)
+            && String(r.QUOTA) === String(requested.QUOTA)
+            && String(r.FROM) === String(requested.FROM)
+            && String(r.TO) === String(requested.TO));
+      });
+    }
     if (!target) {
       target = {
         _rowId: OPT_STATE.nextRowId++,
@@ -2907,9 +4302,10 @@ function applySuccessfulReoptimizeComparison(requestedRows) {
       : getRemovedBerthCount(requested);
     target.comparisonApplied = true;
     target.comparisonStatus = status;
+    // Saved-profile / post-reopt tags stay short: Modified | Removed | Added.
     target.comparisonLabel = status === 'added'
       ? 'Added'
-      : (status === 'removed' ? removedBerthLabel(requested) : (getAllocationChangeLabel(requested) || 'Modified'));
+      : (status === 'removed' ? 'Removed' : 'Modified');
     target.comparisonOriginalBerths = status === 'added' ? null : originalBerths;
     target.comparisonModifiedBerths = status === 'removed' ? 0 : optNum(requested.BERTHS);
 
@@ -2917,6 +4313,14 @@ function applySuccessfulReoptimizeComparison(requestedRows) {
       target.removed = true;
       target.BERTHS = 0;
       target.removedBerthsOrig = originalBerths;
+    } else if (status === 'modified' || status === 'added') {
+      // Keep the card on the payload value even if the optimizer response drifted.
+      target.BERTHS = optNum(requested.BERTHS);
+      target.removed = false;
+    }
+    if (target.CLASS) {
+      OPT_STATE.expandedClasses = OPT_STATE.expandedClasses || {};
+      OPT_STATE.expandedClasses[target.CLASS] = true;
     }
   });
 
@@ -2941,7 +4345,6 @@ function runReoptimize() {
   }
 
   var delta = buildCumulativeReoptimizeDelta(rows);
-  var requestedRows = copyAllocationRowsForComparison(rows);
 
   var fromDate = $('#optFromDate').val();
   var toDate = $('#optToDate').val();
@@ -2949,7 +4352,9 @@ function runReoptimize() {
     alert('Please select valid date range');
     return;
   }
-
+  if (!validateOptimizationEndToEndSelection()) {
+	    return;
+	  }
   setOptimizationEditMode(true);
 
   getReoptimizeData(fromDate, toDate, delta)
@@ -2962,7 +4367,10 @@ function runReoptimize() {
       persistReoptimizeDelta(delta);
       syncCoachBaselineAfterOptimize();
       drawOptimizationProfile(response);
-      applySuccessfulReoptimizeComparison(requestedRows);
+      // Tag every key in the request payload — not only this session's dirty rows.
+      applySuccessfulReoptimizeComparison(
+        editedBerthsMapToComparisonRows((delta && delta.edited_berths) || {})
+      );
     })
     .catch(function (e) {
       console.error(e);
@@ -2974,6 +4382,14 @@ function runReoptimize() {
     })
     .finally(function () {
       setOptimizationEditMode(false);
+      // Re-apply after unlock — highlight is deferred and must win over edit-mode DOM tweaks.
+      if (OPT_STATE.capacityViolation) {
+        window.setTimeout(function () {
+          if (OPT_STATE.capacityViolation) {
+            applyCapacityViolationHighlights(OPT_STATE.capacityViolation);
+          }
+        }, 50);
+      }
     });
 }
 
@@ -3000,6 +4416,23 @@ function bindOptimizationEditorEvents() {
   $doc.on('click.optEditor', '#optimizationContainer .opt-coach-plus', function (e) {
     e.preventDefault();
     adjustCoachCount($(this).attr('data-class'), 1);
+  });
+
+  $doc.on('change.optEditor', '#optimizationContainer .opt-coach-comp', function () {
+    setBerthComp($(this).attr('data-class'), $(this).val());
+  });
+
+  $doc.on('change.optEditor', '#optimizationContainer .opt-coach-count', function () {
+    setCoachCount($(this).attr('data-class'), $(this).val());
+  });
+
+  $doc.on('click.optEditor', '#optimizationContainer .opt-coach-drop', function (e) {
+    e.preventDefault();
+    removeCompositionClass($(this).attr('data-class'));
+  });
+
+  $doc.on('change.optEditor', '#optimizationContainer #optCoachAddClass', function () {
+    addCompositionClass($(this).val());
   });
 
   $doc.on('click.optEditor', '#optimizationContainer .opt-quota-legend-item[data-quota]', function (e) {
@@ -3117,8 +4550,9 @@ function bindOptimizationEditorEvents() {
     if (!row) {
       return;
     }
-    // Remove + ✕ → permanently dismiss: omit from API (do not pass 0).
-    if (!row.comparisonApplied && row.origKey && OPT_STATE.deletedKeys.indexOf(row.origKey) === -1) {
+    // Remove + ✕ → permanently dismiss: omit from API (do not pass 0), including a
+    // previously applied 0 that is still carried in the persisted constraints.
+    if (row.origKey && OPT_STATE.deletedKeys.indexOf(row.origKey) === -1) {
       OPT_STATE.deletedKeys.push(row.origKey);
     }
     OPT_STATE.editedRows = OPT_STATE.editedRows.filter(function (r) { return r._rowId !== rowId; });
@@ -3255,6 +4689,9 @@ function refreshBerthTableSection() {
   updateChangeSummaryPanel();
   applyQuotaFocusMode({ scroll: false });
   flagLiveAllocationValidationErrors();
+  if (OPT_STATE.capacityViolation) {
+    applyCapacityViolationHighlights(OPT_STATE.capacityViolation);
+  }
   if ($('#optCompareClassPills').length) {
     renderOptBerthCompare();
   }
@@ -3379,11 +4816,23 @@ function buildOptimizationTabShell() {
     + '<input type="date" id="optFromDate" class="form-control" style="border-radius:8px;" value="' + range.from + '"></div>'
     + '<div class="col-md-2"><label class="utilization-filter-label">TO DATE</label>'
     + '<input type="date" id="optToDate" class="form-control" style="border-radius:8px;" value="' + range.to + '"></div>'
+    + '<div class="col-md-2"><label class="utilization-filter-label" for="optTrainType">TRAIN TYPE</label>'
+    + '<select id="optTrainType" class="form-control" style="border-radius:8px;height:34px;"><option value="">Select Train Type</option><option value="END_TO_END">End to End</option><option value="NON_END_TO_END">Non End to End</option></select></div>'
+    + '<div id="optEndToEndStations" class="col-md-4" style="display:none;"><div class="row">'
+    + '<div class="col-xs-6"><label class="utilization-filter-label" for="optEndToEndFromStation">END TO END - FROM</label><select id="optEndToEndFromStation" class="form-control" style="border-radius:8px;height:34px;"></select></div>'
+    + '<div class="col-xs-6"><label class="utilization-filter-label" for="optEndToEndToStation">END TO END - TO</label><select id="optEndToEndToStation" class="form-control" style="border-radius:8px;height:34px;"></select></div>'
+    + '</div></div>'
     + '<div class="col-md-2" style="margin-top:24px;">'
     + '<button type="button" id="showOptimizationBtn" class="btn btn-primary form-control" style="font-weight:600;height:34px;">Show Optimization</button></div>'
-    + '</div><div id="optimizationContent"></div>'
+    + '</div>'
+    + '<div id="optPreCompositionWrap" class="opt-pre-composition-wrap" style="display:none;"></div>'
+    + '<div id="optimizationContent"></div>'
   );
   initializeDefaultDatesForOptAndUtil(false);
+  populateOptimizationEndToEndStations();
+  updateOptimizationEndToEndFields();
+  bindOptimizationEditorEvents();
+  renderPreOptimizeComposition();
   if (mode === 'EDIT') {
     refreshOptimizationProfileList();
   }
@@ -3442,6 +4891,7 @@ function drawOptimizationProfile(responseData) {
   OPT_STATE.optimizer = optimizer;
   OPT_STATE.currentUtil = currentUtil;
   OPT_STATE.optimizedUtil = optimizedUtil;
+  OPT_STATE.classCapacity = extractClassCapacityFromOptimizeData(data);
   OPT_STATE.originalRemotes = ensureUniqueCodes(optimizer.remotes || []);
   restoreRemoteStateFromPersisted();
   OPT_STATE.originalBerths = Object.assign({}, optimizer.berths || {});
@@ -3469,6 +4919,8 @@ function drawOptimizationProfile(responseData) {
   OPT_STATE.hasChanges = false;
   OPT_STATE.optimizationLoaded = true;
   OPT_STATE.reoptimizing = false;
+  // A fresh optimizer result is not what is stored against the profile id until it is saved.
+  OPT_PROFILE.profileSaved = false;
   OPT_STATE.focusRowId = null;
   OPT_STATE.expandedClasses = {};
   if (!OPT_STATE.activeAddClass && OPT_STATE.editedRows.length) {
@@ -3479,7 +4931,11 @@ function drawOptimizationProfile(responseData) {
     OPT_STATE.compareClass = compareClasses[0] || OPT_STATE.activeAddClass || ACTIVE_CLASS || '';
   }
 
+  // Composition included in this successful optimize/reoptimize is applied — not a pending change.
+  syncCoachBaselineAfterOptimize();
+
   renderOptimizationDashboard(optimizer, currentUtil, optimizedUtil);
+  renderPreOptimizeComposition();
   bindOptimizationEditorEvents();
   updateReoptimizeButton();
 }
@@ -3605,13 +5061,14 @@ function renderOptimizationDashboard(optimizer, currentUtil, optimizedUtil) {
 
   var html = ''
     + '<div class="opt-top-bar" style="margin-bottom:12px;">'
+    + '<div class="opt-top-bar-text">'
     + '<div class="opt-section-title">Optimised profile</div>'
     + '<div class="opt-section-sub">Review and edit berth allocations, then re-optimise.</div>'
     + '</div>'
+    + '<div id="optProfileStatus" class="opt-profile-status"></div>'
+    + '</div>'
     + buildOptimizationSummaryCards(summary)
     + buildRemotesSection(optimizer.remotes || [])
-    // Train composition card temporarily hidden — keep buildCoachCompositionSection() for later.
-    // + buildCoachCompositionSection()
     + buildBerthTableSection(OPT_STATE.editedRows.length ? OPT_STATE.editedRows : berthRows)
     + (hasComparison ? buildOptBerthCompareSection() : '<div class="alert alert-warning">Profile comparison charts need optimized_analysis.utilization from API.</div>')
     + '<div class="opt-footer-compact">'
@@ -4258,24 +5715,85 @@ function buildProposedAllocationStationMatrixRows(matrix) {
               return r.from === stn || r.to === stn;
           });
       });
-      return stations.map(function(fromStation) {
-          return [fromStation].concat(stations.map(function(toStation) {
+      var sumCellBerths = function (cellText) {
+        if (!cellText || cellText === '-') {
+          return 0;
+        }
+        var total = 0;
+        String(cellText).replace(/\[(\d+)\]/g, function (_m, n) {
+          total += Number(n) || 0;
+          return '';
+        });
+        return total;
+      };
+      var colTotals = stations.map(function () { return 0; });
+      var grandTotal = 0;
+      var bodyRows = stations.map(function(fromStation, rowIdx) {
+          var rowTotal = 0;
+          var cells = stations.map(function(toStation, colIdx) {
               var values = matrix.cells[fromStation + '-' + toStation];
-              return values && values.length ? values.join(', ') : '-';
-          }));
+              var text = values && values.length ? values.join(', ') : '-';
+              var cellSum = sumCellBerths(text);
+              rowTotal += cellSum;
+              colTotals[colIdx] += cellSum;
+              return text;
+          });
+          grandTotal += rowTotal;
+          return [fromStation].concat(cells).concat([String(rowTotal)]);
       });
+      bodyRows.push(['Total'].concat(colTotals.map(String)).concat([String(grandTotal)]));
+      return bodyRows;
   }
+
+  function formatPdfCreatedDate(date) {
+    var d = date || new Date();
+    var day = ('0' + d.getDate()).slice(-2);
+    var month = ('0' + (d.getMonth() + 1)).slice(-2);
+    var year = d.getFullYear();
+    return day + '-' + month + '-' + year;
+  }
+
+  /** Convert yyyy-mm-dd (or Date) to dd-mm-yyyy for PDF headers. */
+  function formatPdfDateDdMmYyyy(value) {
+    if (!value || value === '-') {
+      return '-';
+    }
+    if (value instanceof Date && !isNaN(value.getTime())) {
+      return formatPdfCreatedDate(value);
+    }
+    var s = String(value).trim();
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) {
+      return m[3] + '-' + m[2] + '-' + m[1];
+    }
+    m = s.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (m) {
+      return s;
+    }
+    return s;
+  }
+
   function getOptimizedProfileDetailsForPdf() {
     var selectedRemotes = getVisibleRemoteCodes().join(', ') || '-';
     var trainNo = (SELECTED_TRAIN && (SELECTED_TRAIN.TRAIN_NO || SELECTED_TRAIN.TRAIN_NUMBER || SELECTED_TRAIN.train_number)) || '-';
-    var fromDate = $('#optFromDate').val() || '-';
-    var toDate = $('#optToDate').val() || '-';
-    var profileDate = (SELECTED_TRAIN && SELECTED_TRAIN.PROFILE_DATE) || '-';
+    var fromDate = formatPdfDateDdMmYyyy($('#optFromDate').val() || '-');
+    var toDate = formatPdfDateDdMmYyyy($('#optToDate').val() || '-');
+    var profileDate = formatPdfDateDdMmYyyy((SELECTED_TRAIN && SELECTED_TRAIN.PROFILE_DATE) || '-');
+    var endToEnd = getOptimizationEndToEndSelection();
+    var proposedDate = fromDate;
+    if (toDate && toDate !== '-' && toDate !== fromDate) {
+      proposedDate = fromDate + ' to ' + toDate;
+    }
     return {
       selectedRemotes: selectedRemotes,
+      trainType: endToEnd.flag === 'Y' ? 'End to End' : 'Non End to End',
+      endToEndFrom: endToEnd.fromStation || '-',
+      endToEndTo: endToEnd.toStation || '-',
       trainNo: trainNo,
-      proposedDate: fromDate + (toDate && toDate !== fromDate ? ' to ' + toDate : ''),
-      profileDate: profileDate
+      proposedDate: proposedDate,
+      profileDate: profileDate,
+      createdDate: formatPdfCreatedDate(new Date()),
+      classCapacity: getClassCapacityForPdf()
     };
   }
   function addOptimizedPdfHeader(doc, details) {
@@ -4290,25 +5808,82 @@ function buildProposedAllocationStationMatrixRows(matrix) {
       doc.setFont(undefined, 'normal');
       var y = 35;
       var gap = 8;
+      var valueX = 62;
       doc.setFont(undefined, 'bold');
       doc.text('Train Number', 14, y);
       doc.setFont(undefined, 'normal');
-      doc.text(': ' + details.trainNo, 55, y);
+      doc.text(': ' + details.trainNo, valueX, y);
       y += gap;
       doc.setFont(undefined, 'bold');
       doc.text('Proposed Date', 14, y);
       doc.setFont(undefined, 'normal');
-      doc.text(': ' + details.proposedDate, 55, y);
+      doc.text(': ' + details.proposedDate, valueX, y);
       y += gap;
       doc.setFont(undefined, 'bold');
-      doc.text('Profile Date', 14, y);
+      doc.text('Profile Creation Date', 14, y);
       doc.setFont(undefined, 'normal');
-      doc.text(': ' + details.profileDate, 55, y);
+      doc.text(': ' + (details.createdDate || formatPdfCreatedDate(new Date())), valueX, y);
       y += gap;
       doc.setFont(undefined, 'bold');
       doc.text('Selected Remotes', 14, y);
       doc.setFont(undefined, 'normal');
-      doc.text(': ' + details.selectedRemotes, 55, y);
+      doc.text(': ' + details.selectedRemotes, valueX, y);
+      y += gap;
+
+      // Compact single-line End-to-End summary (no large fixed gaps)
+      var x = 14;
+      var sep = 10;
+      doc.setFont(undefined, 'bold');
+      doc.text('End to End Type', x, y);
+      x += doc.getTextWidth('End to End Type') + 2;
+      doc.setFont(undefined, 'normal');
+      var typeText = ': ' + (details.trainType || '-');
+      doc.text(typeText, x, y);
+      x += doc.getTextWidth(typeText) + sep;
+
+      doc.setFont(undefined, 'bold');
+      doc.text('From Station', x, y);
+      x += doc.getTextWidth('From Station') + 2;
+      doc.setFont(undefined, 'normal');
+      var fromText = ': ' + (details.endToEndFrom || '-');
+      doc.text(fromText, x, y);
+      x += doc.getTextWidth(fromText) + sep;
+
+      doc.setFont(undefined, 'bold');
+      doc.text('To Station', x, y);
+      x += doc.getTextWidth('To Station') + 2;
+      doc.setFont(undefined, 'normal');
+      doc.text(': ' + (details.endToEndTo || '-'), x, y);
+
+      y += gap;
+
+      // Train Seat Capacity (class-wise) from edited_coaches / API capacity
+      var capacity = details.classCapacity || {};
+      var capacityClasses = Object.keys(capacity).sort().filter(function (cls) {
+        return optNum(capacity[cls]) > 0;
+      });
+      if (capacityClasses.length) {
+        doc.setFont(undefined, 'bold');
+        doc.text('Train Seat Capacity', 14, y);
+        y += 6;
+        var capX = 14;
+        capacityClasses.forEach(function (cls) {
+          var valuePart = ': ' + optNum(capacity[cls]);
+          var totalW = doc.getTextWidth(cls) + 1 + doc.getTextWidth(valuePart) + 10;
+          if (capX + totalW > 283) {
+            y += 5;
+            capX = 14;
+          }
+          doc.setFont(undefined, 'bold');
+          doc.text(cls, capX, y);
+          capX += doc.getTextWidth(cls) + 1;
+          doc.setFont(undefined, 'normal');
+          doc.text(valuePart, capX, y);
+          capX += doc.getTextWidth(valuePart) + 10;
+        });
+        y += gap;
+      }
+      return y;
   }
   function downloadOptimizedProfilePdf() {
     try {
@@ -4329,8 +5904,8 @@ function buildProposedAllocationStationMatrixRows(matrix) {
       return;
     }
     var details = getOptimizedProfileDetailsForPdf();
-    addOptimizedPdfHeader(doc, details);
-    var y = 72;
+    var y = addOptimizedPdfHeader(doc, details);
+    y = Math.max(y + 4, 88);
     classes.forEach(function (cls, idx) {
       var matrix = matricesByClass[cls];
       var stations = getOptimizationMatrixStations(matrix.rows).filter(function(stn) {
@@ -4382,7 +5957,7 @@ function buildProposedAllocationStationMatrixRows(matrix) {
       doc.text('Class ' + cls + ' - Proposed allocation matrix', 14, y);
       doc.autoTable({
         startY: y + 4,
-        head: [['Station'].concat(stations)],
+        head: [['Station'].concat(stations).concat(['Total'])],
         body: buildProposedAllocationStationMatrixRows(matrix),
         theme: 'grid',
         pageBreak: 'auto',
@@ -4446,9 +6021,7 @@ function buildProposedAllocationStationMatrixRows(matrix) {
 		      return;
 		    }
 
-		    addOptimizedPdfHeader(doc, details);
-
-		    var y = 72;
+		    var y = Math.max(addOptimizedPdfHeader(doc, details) + 4, 88);
 
 		    classes.forEach(function (cls, idx) {
 
@@ -4520,7 +6093,7 @@ function buildProposedAllocationStationMatrixRows(matrix) {
 		          startY: y + 4,
 
 		          head: [
-		            ['Station'].concat(stations)
+		            ['Station'].concat(stations).concat(['Total'])
 		          ],
 
 		          body: buildProposedAllocationStationMatrixRows(matrix),
@@ -4911,20 +6484,17 @@ function buildAllocCard(r, cls, stations, quotas, disabled, allRows) {
       : ((modified || comparisonStatus === 'modified') ? ' opt-alloc-modified' : ''));
   var cardDisabled = removed ? ' disabled' : disabled;
   var badge = removed
-    ? '<span class="opt-alloc-badge" data-change-type="removed">' + optEsc(removedBerthLabel(r)) + '</span>'
+    ? '<span class="opt-alloc-badge" data-change-type="removed">'
+      + optEsc((r.comparisonApplied && r.comparisonLabel) ? r.comparisonLabel : removedBerthLabel(r)) + '</span>'
     : ((isNew || comparisonStatus || (modified && changeLabel))
       ? '<span class="opt-alloc-badge" data-change-type="' + (comparisonStatus || (isNew ? 'new' : 'modified')) + '">'
         + optEsc(r.comparisonLabel || changeLabel || (isNew ? 'New' : 'Modified')) + '</span>'
       : '<span class="opt-alloc-badge" style="display:none;"></span>');
   var quotaLabel = r.QUOTA ? optEsc(r.QUOTA) : 'Quota';
   var quotaPillTitle = r.QUOTA ? quotaTitleAttr(r.QUOTA) : '';
+  // Badge carries Modified / Removed / Added — no Original → Modified footer line.
   var diffHtml = '';
-  if (r.comparisonApplied) {
-    diffHtml = r.comparisonStatus === 'added'
-      ? '<span class="opt-alloc-diff">Added: <strong>' + optNum(r.comparisonModifiedBerths) + '</strong></span>'
-      : '<span class="opt-alloc-diff">Original: <strong>' + optNum(r.comparisonOriginalBerths)
-        + '</strong> &rarr; Modified: <strong>' + optNum(r.comparisonModifiedBerths) + '</strong></span>';
-  } else if (modified && r.origSnapshot) {
+  if (!r.comparisonApplied && modified && r.origSnapshot) {
     diffHtml = '<span class="opt-alloc-diff">Was: <strong>' + optNum(r.origSnapshot.BERTHS) + '</strong></span>';
   }
   var availableQuotas = removed ? quotas : getAvailableQuotasForRow(r, quotas, allRows || OPT_STATE.editedRows);
