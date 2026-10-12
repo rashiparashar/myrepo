@@ -85,6 +85,9 @@ function bindOptimizationTab() {
 			buildOptimizationTabShell();
 		}
 		initializeDefaultDatesForOptAndUtil(false);
+		if (typeof renderPreOptimizeComposition === 'function') {
+			renderPreOptimizeComposition();
+		}
 		if (typeof OPT_PROFILE !== 'undefined' && OPT_PROFILE.profileMode === 'EDIT') {
 			refreshOptimizationProfileList();
 		}
@@ -102,6 +105,32 @@ function bindOptimizationTab() {
 			loadSelectedOptimizationProfile(profileId);
 		}
 	});
+	$('#optimizationContainer').on('change', '#optTrainType', function () {
+		updateOptimizationEndToEndFields();
+	});
+	$('#optimizationContainer').on('change', '#optEndToEndFromStation', function () {
+		var stations = getOptimizationRouteStations();
+		var fromStation = $(this).val();
+		var selectedTo = $('#optEndToEndToStation').val();
+		var fromIndex = stations.indexOf(fromStation);
+		setSelectOptions('optEndToEndToStation', fromIndex >= 0 ? stations.slice(fromIndex + 1) : stations, 'Select station');
+		if (selectedTo && stations.indexOf(selectedTo) > fromIndex) {
+			$('#optEndToEndToStation').val(selectedTo);
+		}
+	});
+//	$('#optimizationContainer').on('change', '#optTrainType', function () {
+//		updateOptimizationEndToEndFields();
+//	});
+//	$('#optimizationContainer').on('change', '#optEndToEndFromStation', function () {
+//		var stations = getOptimizationRouteStations();
+//		var fromStation = $(this).val();
+//		var selectedTo = $('#optEndToEndToStation').val();
+//		var fromIndex = stations.indexOf(fromStation);
+//		setSelectOptions('optEndToEndToStation', fromIndex >= 0 ? stations.slice(fromIndex + 1) : stations, 'Select station');
+//		if (selectedTo && stations.indexOf(selectedTo) > fromIndex) {
+//			$('#optEndToEndToStation').val(selectedTo);
+//		}
+//	});
 }
 function formatDate(dateStr) {
     if (!dateStr || typeof dateStr !== 'string') return '-';
@@ -139,15 +168,22 @@ function loadTrainOptimization() {
 	getOptimizationData(fromDate, toDate)
 		.then(function (response) {
 			console.log(response);
+			var savedComparisonRows = null;
 			if (OPT_PROFILE.profileMode === 'EDIT' && OPT_PROFILE.profilePayload) {
+				savedComparisonRows = savedPayloadRowsForComparison(OPT_PROFILE.profilePayload);
 				persistReoptimizeDelta({
 					edited_berths: OPT_PROFILE.profilePayload.edited_berths || {},
 					edited_coaches: OPT_PROFILE.profilePayload.edited_coaches || {},
+					edited_berth_comp: OPT_PROFILE.profilePayload.edited_berth_comp || {},
+					edited_phy_berths: OPT_PROFILE.profilePayload.edited_phy_berths || {},
 					remote_added: OPT_PROFILE.profilePayload.remote_added || [],
 					remote_removed: OPT_PROFILE.profilePayload.remote_removed || []
 				});
 			}
 			drawOptimizationProfile(response);
+			if (savedComparisonRows) {
+				applySuccessfulReoptimizeComparison(savedComparisonRows);
+			}
 		})
 		.catch(function (error) {
 			console.error(error);
