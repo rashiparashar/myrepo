@@ -2382,7 +2382,9 @@ public class TypeOneRestController {
 			    String profileDate = params[2];
 			    String fromDate = params[3];
 			    String toDate = params[4];
-
+			    String endToEndFlag = params.length > 5 ? params[5] : "N";
+			    String endToEndFromStation = params.length > 6 ? params[6] : "";
+			    String endToEndToStation = params.length > 7 ? params[7] : "";
 			    String uri =
 			            "http://10.64.28.95:80/TPO/train/train/optimize/{num}";
 
@@ -2406,7 +2408,9 @@ public class TypeOneRestController {
 			    body.put("profile_date", profileDate);
 			    body.put("start_date", fromDate);
 			    body.put("end_date", toDate);
-
+			    body.put("end_to_end", endToEndFlag);
+			    body.put("end_to_end_from", endToEndFromStation);
+			    body.put("end_to_end_to", endToEndToStation);
 			    if (rps.getEdited_berths() != null &&
 			            !rps.getEdited_berths().isEmpty()) {
 
@@ -2422,6 +2426,15 @@ public class TypeOneRestController {
 			        body.put(
 			                "edited_coaches",
 			                rps.getEdited_coaches()
+			        );
+			    }
+
+			    if (rps.getEdited_phy_berths() != null &&
+			            !rps.getEdited_phy_berths().isEmpty()) {
+
+			        body.put(
+			                "edited_phy_berths",
+			                rps.getEdited_phy_berths()
 			        );
 			    }
 
@@ -2577,6 +2590,9 @@ public class TypeOneRestController {
 			            rps.getEdited_berths() != null ? rps.getEdited_berths() : new HashMap<String, Object>());
 			    body.put("edited_coaches",
 			            rps.getEdited_coaches() != null ? rps.getEdited_coaches() : new HashMap<String, Object>());
+			    if (rps.getEdited_phy_berths() != null && !rps.getEdited_phy_berths().isEmpty()) {
+			        body.put("edited_phy_berths", rps.getEdited_phy_berths());
+			    }
 			    body.put("remote_added",
 			            rps.getRemote_added() != null ? rps.getRemote_added() : new ArrayList<Object>());
 			    body.put("remote_removed",
