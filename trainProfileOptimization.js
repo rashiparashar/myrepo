@@ -1651,6 +1651,477 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 
 
+/* ===================== Quota Distribution search + Download Current Profile (PDF) ===================== */
+var CP_QUOTA_ORDER = ['GN','LD','HO','RC','PT','TQ','PQ','SS','HP','TTE','RPF','OS'];
+var CP_CLASS_ORDER = ['1A','EV','EC','2A','3A','3E','CC','SL','2S'];
+var CP_DAYS = ['MON','TUE','WED','THU','FRI','SAT','SUN'];
+var CP_DAY_KEYS = ['RUN_MON','RUN_TUE','RUN_WED','RUN_THU','RUN_FRI','RUN_SAT','RUN_SUN'];
+var QD_TRAINS = {};      // trainNo -> normalized record built from the quota distribution API
+var QD_ORDER = [];       // train numbers in API order
+var QD_LOADED = false;
+
+function apiFetchQuotaDistributionData() {
+  var curDate = new Date().toISOString().slice(0, 10);
+  var requestData = { params: [curDate] };
+  return getWebServiceDataTrain(
+    requestData,
+    '/newtemplatebasedmis/webapi/typeOne/getQuotaDistributionData'
+  );
+}
+
+function cpNum(v) { var n = Number(v); return isNaN(n) ? 0 : n; }
+function cpCell(n) { return n > 0 ? String(n) : '...'; }
+function qdEsc(v) {
+  return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** yyyy-mm-dd -> d-m-yyyy (no zero padding, as in the legacy report). */
+function cpFmtDate(iso) {
+  var p = String(iso || '').split('-');
+  if (p.length !== 3) { return String(iso || ''); }
+  return Number(p[2]) + '-' + Number(p[1]) + '-' + p[0];
+}
+
+/** Dummy-coach rows are flagged by the payload; check the usual flag columns. */
+function cpIsDummy(row) {
+  var keys = ['F_DUMMY', 'DUMMY', 'DUMMY_FLAG', 'IS_DUMMY', 'dummy', 'COACH_TYPE'];
+  for (var i = 0; i < keys.length; i++) {
+    var v = row && row[keys[i]];
+    if (v == null) { continue; }
+    v = String(v).trim().toUpperCase();
+    if (v === 'Y' || v === 'D' || v === 'DUMMY' || v === 'TRUE' || v === '1') { return true; }
+  }
+  return false;
+}
+
+function cpSortBy(list, order) {
+  return list.slice().sort(function (a, b) {
+    var ia = order.indexOf(a), ib = order.indexOf(b);
+    if (ia === -1) { ia = 999; }
+    if (ib === -1) { ib = 999; }
+    if (ia !== ib) { return ia - ib; }
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+}
+
+/** "OS(MLAH)" -> { code:'OS', sub:'MLAH' }; plain "GN" -> { code:'GN', sub:'' } */
+function cpSplitQuota(q) {
+  var m = String(q || '').trim().match(/^([A-Za-z0-9]+)\s*\(([^)]*)\)$/);
+  return m ? { code: m[1].toUpperCase(), sub: m[2].trim() } : { code: String(q || '').trim().toUpperCase(), sub: '' };
+}
+
+/**
+ * Table data for one "Quota Distribution in ... Coaches" section, or null if empty:
+ * { title, head:[...], body:[[...]], foot:[[...],[...]] } ready for autoTable.
+ */
+function cpBuildQuotaTable(title, berthRows, coachRows, routeFirst, routeLast) {
+  var classes = {};
+  var lines = {};
+  berthRows.forEach(function (r) {
+    var cls = String(r.CLS || r.CLASS || '').trim();
+    var q = cpSplitQuota(r.QUOTA_TYPE || r.QUOTA || '');
+    var n = cpNum(r.BERTH != null ? r.BERTH : (r.ALLOCATED_BERTHS != null ? r.ALLOCATED_BERTHS : r.BERTHS));
+    if (!cls || !q.code || n <= 0) { return; }
+    classes[cls] = 1;
+    var src = String(r.SOURCE || r.FROM || '').trim();
+    var dst = String(r.DESTINATION || r.TO || '').trim();
+    var partial = !!(src && dst && routeFirst && routeLast && (src !== routeFirst || dst !== routeLast));
+    var key = q.code + '|' + q.sub + '|' + (partial ? src + '-' + dst : '');
+    if (!lines[key]) { lines[key] = { code: q.code, sub: q.sub, span: partial ? src + '-' + dst : '', cells: {} }; }
+    lines[key].cells[cls] = (lines[key].cells[cls] || 0) + n;
+  });
+  var clsList = cpSortBy(Object.keys(classes), CP_CLASS_ORDER);
+  if (!clsList.length) { return null; }
+  var keys = Object.keys(lines).sort(function (a, b) {
+    var A = lines[a], B = lines[b];
+    var ia = CP_QUOTA_ORDER.indexOf(A.code), ib = CP_QUOTA_ORDER.indexOf(B.code);
+    if (ia === -1) { ia = 999; }
+    if (ib === -1) { ib = 999; }
+    if (ia !== ib) { return ia - ib; }
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+
+  var body = [];
+  var totals = {};
+  keys.forEach(function (k) {
+    var L = lines[k];
+    var label = L.code + (L.sub ? ' (' + L.sub + ')' : (L.span ? ' (' + L.span + ')' : ''));
+    var row = [label];
+    clsList.forEach(function (c) {
+      var n = L.cells[c] || 0;
+      totals[c] = (totals[c] || 0) + n;
+      row.push(cpCell(n));
+    });
+    var stn = '...';
+    if (L.sub) {
+      var full = (typeof getQuotaFullName === 'function') ? getQuotaFullName(L.sub) : '';
+      stn = (full && full !== L.sub) ? full : L.sub;
+    }
+    row.push(stn);
+    body.push(row);
+  });
+
+  var coachMap = {};
+  coachRows.forEach(function (r) {
+    var c = String(r.CLS || r.CLASS || '').trim();
+    if (c) { coachMap[c] = (coachMap[c] || 0) + getPhysicalCoachCount(r); }
+  });
+  var totRow = ['TOTAL'];
+  var coachRow = ['TOT COACHES'];
+  clsList.forEach(function (c) {
+    totRow.push(String(totals[c] || 0));
+    coachRow.push(String(coachMap[c] || 0));
+  });
+  totRow.push('');
+  coachRow.push('');
+
+  return { title: title, head: ['QT/CLS'].concat(clsList).concat(['STATION NAME']), body: body, foot: [totRow, coachRow] };
+}
+
+/* ---------- Normalizing the quota distribution API response ---------- */
+
+function qdFirstArray(obj, keys) {
+  for (var i = 0; i < keys.length; i++) {
+    if (obj && Array.isArray(obj[keys[i]])) { return obj[keys[i]]; }
+  }
+  return null;
+}
+
+function qdMaxCoachRows(map) {
+  return Object.keys(map).map(function (c) { return { CLS: c, NUM_COACHES: map[c] }; });
+}
+
+/**
+ * Accepts either a list of train objects carrying nested arrays
+ *   { TRAIN_NUMBER, TRAIN_NAME, ..., berths:[], dummy:[], physical_comp:[], dummy_physical:[], route:[] }
+ * or a flat list of allocation rows
+ *   { TRAIN_NUMBER, CLS, QUOTA_TYPE, BERTH, NUM_COACHES, (dummy flag) ... }
+ * (the list itself may be the response or sit under train_list / trains / data / rows).
+ */
+function qdNormalizeResponse(resp) {
+  var list = Array.isArray(resp) ? resp : qdFirstArray(resp, ['train_list', 'trains', 'data', 'rows', 'quota_distribution']);
+  var map = {};
+  var order = [];
+  (list || []).forEach(function (o) {
+    var key = String(getTrainNumber(o) || '').trim();
+    if (!key) { return; }
+    var rec = map[key];
+    if (!rec) {
+      rec = map[key] = { trainNo: key, info: {}, normal: [], dummy: [], physNormal: [], physDummy: [],
+                         route: [], flatN: {}, flatD: {}, hasPhysN: false, hasPhysD: false };
+      order.push(key);
+    }
+    var name = pick(o, ['TRAIN_NAME', 'train_name', 'trainName', 'TRAIN_NM']);
+    if (name && !rec.info.TRAIN_NAME) { rec.info.TRAIN_NAME = name; }
+    var src = pick(o, ['SRC_STN', 'src_stn', 'SOURCE_STN', 'FROM_STN']);
+    if (src && !rec.info.SRC_STN) { rec.info.SRC_STN = src; }
+    var dst = pick(o, ['DSTN_STN', 'dstn_stn', 'DEST_STN', 'TO_STN']);
+    if (dst && !rec.info.DSTN_STN) { rec.info.DSTN_STN = dst; }
+    ['ROUTE_NO', 'ROUTE_ID', 'VALID_FROM', 'VALID_TO', 'PROFILE_DATE', 'EE_FROM', 'EE_UPTO']
+      .concat(CP_DAY_KEYS).forEach(function (k) {
+        if (o[k] != null && o[k] !== '' && rec.info[k] == null) { rec.info[k] = o[k]; }
+      });
+
+    var nBerths = qdFirstArray(o, ['berths']);
+    var dBerths = qdFirstArray(o, ['dummy', 'dummy_berths']);
+    var nPhys = qdFirstArray(o, ['physical_comp', 'physical']);
+    var dPhys = qdFirstArray(o, ['dummy_physical', 'dummy_coaches']);
+    var rt = qdFirstArray(o, ['route']);
+    if (rt && !rec.route.length) { rec.route = rt; }
+
+    if (nBerths || dBerths || nPhys || dPhys) {
+      (nBerths || []).forEach(function (r) { (cpIsDummy(r) ? rec.dummy : rec.normal).push(r); });
+      (dBerths || []).forEach(function (r) { rec.dummy.push(r); });
+      (nPhys || []).forEach(function (r) { if (cpIsDummy(r)) { rec.physDummy.push(r); } else { rec.physNormal.push(r); rec.hasPhysN = true; } });
+      (dPhys || []).forEach(function (r) { rec.physDummy.push(r); rec.hasPhysD = true; });
+      if (rec.physDummy.length) { rec.hasPhysD = true; }
+    } else {
+      var isD = cpIsDummy(o);
+      (isD ? rec.dummy : rec.normal).push(o);
+      var c = String(o.CLS || o.CLASS || '').trim();
+      var cnt = getPhysicalCoachCount(o);
+      var tgt = isD ? rec.flatD : rec.flatN;
+      if (c && cnt > (tgt[c] || 0)) { tgt[c] = cnt; }
+    }
+  });
+  return { map: map, order: order };
+}
+
+/** Most common SOURCE-DESTINATION pair in the rows = the full-route span when no route list is given. */
+function qdGuessFullSpan(rows) {
+  var counts = {};
+  var best = null;
+  rows.forEach(function (r) {
+    var s = String(r.SOURCE || r.FROM || '').trim();
+    var d = String(r.DESTINATION || r.TO || '').trim();
+    if (!s || !d) { return; }
+    var k = s + '|' + d;
+    counts[k] = (counts[k] || 0) + 1;
+    if (!best || counts[k] > counts[best]) { best = k; }
+  });
+  return best ? best.split('|') : ['', ''];
+}
+
+/** Report data (header lines + both tables + EE route) for one train record. */
+function qdBuildReportData(rec) {
+  var info = rec.info || {};
+  var route = rec.route || [];
+  var rf = route.length ? String(route[0].STN_CODE || '').trim() : '';
+  var rl = route.length ? String(route[route.length - 1].STN_CODE || '').trim() : '';
+  if (!rf || !rl) {
+    var span = qdGuessFullSpan(rec.normal.concat(rec.dummy));
+    rf = rf || span[0];
+    rl = rl || span[1];
+  }
+
+  var runDays = [];
+  CP_DAYS.forEach(function (d, i) { if (info[CP_DAY_KEYS[i]] === 'Y') { runDays.push(d); } });
+
+  var rem = route.filter(function (s) { return s.F_REM_LOC === 'Y'; });
+  var eeFrom = info.EE_FROM || (rem.length ? rem[0].STN_CODE : '');
+  var eeTo = info.EE_UPTO || (rem.length ? rem[rem.length - 1].STN_CODE : '');
+
+  // Route number defaults to 1 when the service does not give a positive number.
+  var routeNo = Number(info.ROUTE_NO || info.ROUTE_ID);
+  if (!routeNo || routeNo < 1) { routeNo = 1; }
+
+  var validFrom = info.VALID_FROM || info.PROFILE_DATE || new Date().toISOString().slice(0, 10);
+  var validTo = info.VALID_TO ? cpFmtDate(info.VALID_TO) : '99-99-2099';
+
+  var normalCoaches = rec.hasPhysN ? rec.physNormal : qdMaxCoachRows(rec.flatN);
+  var dummyCoaches = rec.hasPhysD ? rec.physDummy : qdMaxCoachRows(rec.flatD);
+
+  return {
+    trainNo: rec.trainNo,
+    profileDate: validFrom,
+    infoLines: [
+      'For Definition Valid From ' + cpFmtDate(validFrom) + ' To ' + validTo,
+      'For Profiles on : ' + (runDays.length ? runDays.join('  ') : CP_DAYS.join('  ')),
+      'Route No: ' + routeNo,
+      'Train Name: ' + (info.TRAIN_NAME || ''),
+      'Source: ' + (info.SRC_STN || rf),
+      'Destination: ' + (info.DSTN_STN || rl)
+    ],
+    normal: cpBuildQuotaTable('Quota Distribution in Normal Coaches', rec.normal, normalCoaches, rf, rl),
+    dummy: cpBuildQuotaTable('Quota Distribution in Dummy Coaches', rec.dummy, dummyCoaches, rf, rl),
+    eeFrom: eeFrom,
+    eeTo: eeTo
+  };
+}
+
+/* ---------- PDF ---------- */
+
+function cpDrawBanner(doc, text) {
+  doc.setFillColor(27, 79, 216);
+  doc.rect(0, 0, 297, 25, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(18);
+  doc.setFont(undefined, 'bold');
+  doc.text(text, 14, 16);
+}
+
+function cpDrawQuotaTable(doc, tbl, y, bannerText) {
+  if (!tbl) { return y; }
+  if (y > 150) {
+    doc.addPage();
+    cpDrawBanner(doc, bannerText);
+    y = 36;
+  }
+  doc.setTextColor(27, 79, 216);
+  doc.setFontSize(12);
+  doc.setFont(undefined, 'bold');
+  doc.text(tbl.title, 14, y);
+
+  var lastCol = tbl.head.length - 1;
+  var colStyles = { 0: { halign: 'left', fontStyle: 'bold' } };
+  colStyles[lastCol] = { halign: 'left' };
+
+  doc.autoTable({
+    startY: y + 4,
+    head: [tbl.head],
+    body: tbl.body,
+    foot: tbl.foot,
+    showFoot: 'lastPage',
+    theme: 'grid',
+    pageBreak: 'auto',
+    styles: { fontSize: 9, cellPadding: 2, overflow: 'linebreak', halign: 'center', valign: 'middle' },
+    headStyles: { fillColor: [27, 79, 216], textColor: [255, 255, 255], fontStyle: 'bold' },
+    bodyStyles: { fillColor: [239, 246, 255], textColor: [31, 47, 77] },
+    alternateRowStyles: { fillColor: [232, 246, 238] },
+    footStyles: { fillColor: [219, 234, 254], textColor: [27, 79, 216], fontStyle: 'bold' },
+    columnStyles: colStyles,
+    margin: { left: 14, right: 14 }
+  });
+  return doc.lastAutoTable.finalY + 12;
+}
+
+function cpGenerateCurrentProfilePdf(data) {
+  var JsPDF = window.jspdf && window.jspdf.jsPDF;
+  if (!JsPDF && window.jsPDF) { JsPDF = window.jsPDF; }
+  if (!JsPDF) {
+    alert('PDF download library is not available. Please refresh the page and try again.');
+    return;
+  }
+  var doc = new JsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  if (typeof doc.autoTable !== 'function') {
+    alert('PDF table library is not available. Please refresh the page and try again.');
+    return;
+  }
+
+  var bannerText = 'QUOTA DISTRIBUTION FOR TRAIN NO : ' + data.trainNo;
+  cpDrawBanner(doc, bannerText);
+
+  var y = 36;
+  doc.setTextColor(31, 47, 77);
+  doc.setFontSize(10);
+  doc.setFont(undefined, 'normal');
+  data.infoLines.forEach(function (line) {
+    doc.text(line, 14, y);
+    y += 7;
+  });
+  y += 6;
+
+  y = cpDrawQuotaTable(doc, data.normal, y, bannerText);
+  y = cpDrawQuotaTable(doc, data.dummy, y, bannerText);
+
+  if (y > 160) {
+    doc.addPage();
+    cpDrawBanner(doc, bannerText);
+    y = 36;
+  }
+  doc.setTextColor(27, 79, 216);
+  doc.setFontSize(12);
+  doc.setFont(undefined, 'bold');
+  doc.text('End-to-End (EE) Route', 14, y);
+  doc.autoTable({
+    startY: y + 4,
+    head: [['Route', 'EE FROM', 'EE UPTO']],
+    body: [['0', data.eeFrom || '...', data.eeTo || '...']],
+    theme: 'grid',
+    tableWidth: 120,
+    styles: { fontSize: 9, cellPadding: 2, halign: 'center', valign: 'middle' },
+    headStyles: { fillColor: [27, 79, 216], textColor: [255, 255, 255], fontStyle: 'bold' },
+    bodyStyles: { fillColor: [239, 246, 255], textColor: [31, 47, 77] },
+    margin: { left: 14, right: 14 }
+  });
+
+  var trainNo = String(data.trainNo || 'train').replace(/[^a-z0-9_-]+/gi, '-');
+  var pDate = String(data.profileDate || '').replace(/[^a-z0-9_-]+/gi, '-');
+  doc.save('current-profile-' + trainNo + (pDate ? '-' + pDate : '') + '.pdf');
+}
+
+function downloadCurrentProfileData(trainNo) {
+  var rec = QD_TRAINS[String(trainNo || '').trim()];
+  if (!rec) {
+    alert('No profile data found for train ' + trainNo + '.');
+    return;
+  }
+  try {
+    cpGenerateCurrentProfilePdf(qdBuildReportData(rec));
+  } catch (e) {
+    console.error('Current profile PDF download failed:', e);
+    alert('Failed to generate current profile PDF. Please check the browser console.');
+  }
+}
+
+/* ---------- Search UI (new "Enter Your Train Number" box) ---------- */
+
+function qdSetResult(html) {
+  var el = byId('qdResult');
+  if (el) { el.innerHTML = html; }
+}
+
+/** Searches the quota distribution API data only: exact train number first, else number prefix / name match. */
+function qdSearchTrains(term) {
+  var t = String(term || '').trim().toUpperCase();
+  if (!t) { return []; }
+  if (QD_TRAINS[t]) { return [QD_TRAINS[t]]; }
+  var hits = [];
+  for (var i = 0; i < QD_ORDER.length && hits.length < 10; i++) {
+    var rec = QD_TRAINS[QD_ORDER[i]];
+    var name = String(rec.info.TRAIN_NAME || '').toUpperCase();
+    if (rec.trainNo.toUpperCase().indexOf(t) === 0 || (name && name.indexOf(t) !== -1)) { hits.push(rec); }
+  }
+  return hits;
+}
+
+function qdRunSearch() {
+  if (!QD_LOADED) { return; }
+  var term = byId('qdTrainNo').value;
+  if (!String(term || '').trim()) {
+    qdSetResult('<div class="alert alert-warning">Please enter a train number.</div>');
+    return;
+  }
+  var hits = qdSearchTrains(term);
+  if (!hits.length) {
+    qdSetResult('<div class="alert alert-danger">No train found for "' + qdEsc(term) + '".</div>');
+    return;
+  }
+  var rows = hits.map(function (rec) {
+    return '<tr>' +
+      '<td><b>' + qdEsc(rec.trainNo) + '</b></td>' +
+      '<td>' + qdEsc(rec.info.TRAIN_NAME || '') + '</td>' +
+      '<td>' + qdEsc(rec.info.SRC_STN || '') + '</td>' +
+      '<td>' + qdEsc(rec.info.DSTN_STN || '') + '</td>' +
+      '<td class="text-center"><button type="button" class="btn btn-primary btn-sm qdDownloadBtn" data-train="' + qdEsc(rec.trainNo) + '">' +
+      '<i class="fa fa-download"></i> Download Current Profile Data</button></td>' +
+      '</tr>';
+  }).join('');
+  qdSetResult(
+    '<div class="table-responsive"><table class="table table-bordered table-striped">' +
+    '<thead><tr><th>Train No</th><th>Train Name</th><th>Source</th><th>Destination</th><th class="text-center">Download</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table></div>'
+  );
+}
+
+function qdInit() {
+  var input = byId('qdTrainNo');
+  var btn = byId('qdSearchBtn');
+  var result = byId('qdResult');
+  if (!input || !btn) { return; }
+
+  var btnHtml = btn.innerHTML;
+  input.disabled = true;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Downloading current Profile Data...';
+
+  function ready() {
+    input.disabled = false;
+    btn.disabled = false;
+    btn.innerHTML = btnHtml;
+  }
+
+  Promise.resolve(apiFetchQuotaDistributionData())
+    .then(function (resp) {
+      var n = qdNormalizeResponse(resp);
+      QD_TRAINS = n.map;
+      QD_ORDER = n.order;
+      QD_LOADED = true;
+      ready();
+    })
+    .catch(function (e) {
+      console.error('Quota distribution data load failed:', e);
+      ready();
+      qdSetResult('<div class="alert alert-danger">Unable to load train data. Please refresh the page and try again.</div>');
+    });
+
+  btn.addEventListener('click', function (e) { e.preventDefault(); qdRunSearch(); });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); qdRunSearch(); }
+  });
+  if (result) {
+    result.addEventListener('click', function (e) {
+      var t = e.target;
+      while (t && t !== result && !(t.className && String(t.className).indexOf('qdDownloadBtn') !== -1)) { t = t.parentNode; }
+      if (t && t !== result) { e.preventDefault(); downloadCurrentProfileData(t.getAttribute('data-train')); }
+    });
+  }
+}
+
+document.addEventListener('DOMContentLoaded', qdInit);
+window.downloadCurrentProfileData = downloadCurrentProfileData;
+/* ===================== /Quota Distribution search + Download Current Profile ===================== */
+
 function formatDateForInit(date) {
     const day = String(date.getDate()).padStart(2, '0');
     const month = String(date.getMonth() + 1).padStart(2, '0');
