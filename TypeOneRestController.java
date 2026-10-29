@@ -2058,6 +2058,38 @@ public class TypeOneRestController {
 			@POST
 			@Produces({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
 			@Consumes({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
+			@Path("/getQuotaDistributionData")
+			@Transactional(dontRollbackOn = TypeOneRestController.class)
+			public JsonNode getQuotaDistributionData(RequestParameters rps)
+			        throws JsonProcessingException, IOException {
+
+			    Object[] rawParams = rps.getParams();
+			    String curDate = rawParams != null && rawParams.length > 0 ? String.valueOf(rawParams[0]).trim() : "";
+
+			    // NOTE: confirm the exact TPO path/query names of the quota distribution (all trains) service.
+			    String requestUri =
+			            "http://10.64.28.95:80/TPO/train/quotaDistribution/"
+			            + "?cur_date={cur_date}";
+
+			    SimpleClientHttpRequestFactory rf =
+			            new SimpleClientHttpRequestFactory();
+			    rf.setReadTimeout(300000);
+			    rf.setConnectTimeout(300000);
+			    RestTemplate result = new RestTemplate(rf);
+
+			    HashMap<String, String> map = new HashMap<String, String>();
+			    map.put("cur_date", curDate);
+
+			    ResponseEntity<String> response =
+			            result.getForEntity(requestUri, String.class, map);
+
+			    ObjectMapper oMapper = new ObjectMapper();
+			    return oMapper.readTree(response.getBody());
+			}
+
+			@POST
+			@Produces({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
+			@Consumes({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
 			@Path("/getTrainList")
 			@Transactional(dontRollbackOn = TypeOneRestController.class)
 			public JsonNode getTrainList(RequestParameters rps)
@@ -2611,4 +2643,85 @@ public class TypeOneRestController {
 			    ObjectMapper oMapper = new ObjectMapper();
 			    return oMapper.readTree(response.getBody());
 			}
+			@POST
+			@Produces({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
+			@Consumes({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
+			@Path("/getListQuota")
+			@Transactional(dontRollbackOn = TypeOneRestController.class)
+			public JsonNode getListQuota(RequestParameters rps)
+			        throws JsonProcessingException, IOException {
+
+			    String[] params = Arrays.copyOf(
+			            rps.getParams(),
+			            rps.getParams().length,
+			            String[].class
+			    );
+			    String curDate = params[0];
+
+
+			    String requestUri =
+			            "http://10.64.28.95:80/TPO/train/list_quota/"
+			            + "?cur_date={cur_date}";
+
+			    SimpleClientHttpRequestFactory rf =
+			            new SimpleClientHttpRequestFactory();
+
+			    rf.setReadTimeout(300000);
+			    rf.setConnectTimeout(300000);
+
+			    RestTemplate result = new RestTemplate(rf);
+
+			    HashMap<String, String> map =
+			            new HashMap<String, String>();
+
+			    map.put("cur_date", curDate);
+
+			    ResponseEntity<String> response =
+			            result.getForEntity(
+			                    requestUri,
+			                    String.class,
+			                    map
+			            );
+
+			    ObjectMapper oMapper = new ObjectMapper();
+
+			    JsonNode reportData =
+			            oMapper.readTree(response.getBody());
+
+
+
+			    return reportData;
+			}
+			@POST
+			@Produces({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
+			@Consumes({ MediaType.APPLICATION_XML, MediaType.APPLICATION_JSON })
+			@Path("/getQuotaProfile")
+			@Transactional(dontRollbackOn = TypeOneRestController.class)
+			public JsonNode getQuotaProfile(RequestParameters rps)
+			        throws JsonProcessingException, IOException {
+
+			    Object[] rawParams = rps.getParams();
+			    String num = rawParams != null && rawParams.length > 0 ? String.valueOf(rawParams[0]).trim() : "";
+			    String siteId = rawParams != null && rawParams.length > 1 ? String.valueOf(rawParams[1]).trim() : "";
+
+			    String requestUri =
+			            "http://10.64.28.95:80/TPO/train/getQuotaProfile/{num}?site_id={site_id}";
+
+			    SimpleClientHttpRequestFactory rf =
+			            new SimpleClientHttpRequestFactory();
+			    rf.setReadTimeout(300000);
+			    rf.setConnectTimeout(300000);
+			    RestTemplate result = new RestTemplate(rf);
+
+			    HashMap<String, String> map = new HashMap<String, String>();
+			    map.put("num", num);
+			    map.put("site_id", siteId);
+
+			    ResponseEntity<String> response =
+			            result.getForEntity(requestUri, String.class, map);
+
+			    ObjectMapper oMapper = new ObjectMapper();
+			    return oMapper.readTree(response.getBody());
+			}
+
 }
