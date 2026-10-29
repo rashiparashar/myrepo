@@ -378,7 +378,30 @@
                                 </button>
                             </div>
 
+                            <div class="col-md-4" style="border-left:1px solid #e1e5ec;">
+                                <label for="qdTrainNo">Enter Your Train Number</label>
+                                <input
+                                    type="text"
+                                    class="form-control"
+                                    id="qdTrainNo"
+                                    placeholder="Enter Train Number / Name"
+                                    autocomplete="off"
+                                >
+                            </div>
+
+                            <div class="col-md-2" style="margin-top:25px;">
+                                <button
+                                    id="qdSearchBtn"
+                                    type="button"
+                                    class="btn btn-primary form-control"
+                                >
+                                    <i class="fa fa-search"></i> Download Train Profile Data
+                                </button>
+                            </div>
+
                         </div>
+
+                        <div id="qdResult" style="margin-top:15px;"></div>
 
                         <div id="trainDetailsSection" style="display:none;margin-top:20px;">
                             <div id="trainInfo"></div>
@@ -766,7 +789,10 @@
 	</c:if>
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.34' />"></script>
+<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.35' />"></script>
+<script src="<c:url value='/resources/js/setTrainProfileOptimization.js?version=23.13' />"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="<c:url value='/resources/js/trainProfileOptimization.js?version=21.35' />"></script>
 <script src="<c:url value='/resources/js/setTrainProfileOptimization.js?version=23.13' />"></script>
 <script src="<c:url value='/resources/js/setTrainProfileOptimizationUtilization.js?version=23.2' />"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
